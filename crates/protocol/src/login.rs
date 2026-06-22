@@ -2,12 +2,12 @@ use hmac::{Hmac, Mac};
 use liqi::pb;
 use sha2::Sha256;
 
-pub const RESOURCE_VERSION: &str = "0.16.231";
+pub const RESOURCE_VERSION: &str = "0.16.237";
 pub const PACKAGE_VERSION: &str = "4.0.44";
 pub const LOGIN_BEAT_CONTRACT: &str = "DF2vkXCnfeXp4WoGrBGNcJBufZiMN3uP";
 
 pub fn client_version_string() -> String {
-    format!("WebGL_2022-{}", RESOURCE_VERSION.trim_end_matches(".w"))
+    format!("WebGL_2022-{}", RESOURCE_VERSION)
 }
 
 pub fn password_digest(password: &str) -> String {
