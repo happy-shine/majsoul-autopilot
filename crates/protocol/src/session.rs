@@ -587,7 +587,7 @@ mod tests {
     fn start_match_payload_uses_current_webgl_client_version() {
         let payload = start_match_payload("1:9".to_string());
         assert_eq!(payload.match_sid, "1:9");
-        assert_eq!(payload.client_version_string, "WebGL_2022-0.16.229");
+        assert_eq!(payload.client_version_string, client_version_string());
     }
 
     #[test]

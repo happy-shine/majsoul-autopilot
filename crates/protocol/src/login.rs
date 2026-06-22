@@ -91,7 +91,7 @@ mod tests {
         assert!(payload.gen_access_token);
         assert_eq!(payload.r#type, 0);
         assert_eq!(payload.random_key, "device-1");
-        assert_eq!(payload.client_version_string, "WebGL_2022-0.16.229");
+        assert_eq!(payload.client_version_string, client_version_string());
         assert_eq!(payload.tag, "cn");
         assert_eq!(payload.currency_platforms, vec![1, 2, 5, 6, 8, 10, 11]);
 
