@@ -292,6 +292,9 @@ impl Bridge {
                     });
                 }
                 events.push(Event::EndKyoku);
+                if action.gameend.is_some() {
+                    events.push(Event::EndGame);
+                }
             }
             "ActionNoTile" => {
                 let action = pb::ActionNoTile::decode(data)?;
@@ -301,6 +304,9 @@ impl Bridge {
                     liujumanguan: action.liujumanguan,
                 });
                 events.push(Event::EndKyoku);
+                if action.gameend {
+                    events.push(Event::EndGame);
+                }
             }
             "ActionLiuJu" => {
                 let action = pb::ActionLiuJu::decode(data)?;
@@ -311,6 +317,9 @@ impl Bridge {
                     reason: action.r#type,
                 });
                 events.push(Event::EndKyoku);
+                if action.gameend.is_some() {
+                    events.push(Event::EndGame);
+                }
             }
             _ => {}
         }
@@ -764,6 +773,81 @@ mod tests {
             ]
         );
         assert_eq!(bridge.round_end_counter(), 1);
+    }
+
+    #[test]
+    fn terminal_hule_emits_end_game_after_end_kyoku() {
+        let mut bridge = Bridge::new(0);
+        let hule = encode(pb::ActionHule {
+            hules: vec![pb::HuleInfo {
+                seat: 3,
+                dadian: 0,
+                hu_tile: "9p".to_string(),
+                zimo: false,
+                point_sum: 12300,
+                ..Default::default()
+            }],
+            gameend: Some(pb::GameEnd {
+                scores: vec![1600, 36700, 42700, 19000],
+            }),
+            ..Default::default()
+        });
+
+        let events = bridge.handle_action("ActionHule", &hule).unwrap();
+
+        assert!(matches!(events.last(), Some(Event::EndGame)));
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Hule { actor: 3, .. }, Event::EndKyoku, Event::EndGame]
+        ));
+    }
+
+    #[test]
+    fn terminal_exhaustive_draw_emits_end_game_after_end_kyoku() {
+        let mut bridge = Bridge::new(0);
+        let end = encode(pb::ActionNoTile {
+            gameend: true,
+            ..Default::default()
+        });
+
+        let events = bridge.handle_action("ActionNoTile", &end).unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                Event::NoTile {
+                    liujumanguan: false
+                },
+                Event::EndKyoku,
+                Event::EndGame,
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_abortive_draw_emits_end_game_after_end_kyoku() {
+        let mut bridge = Bridge::new(0);
+        let end = encode(pb::ActionLiuJu {
+            r#type: 1,
+            gameend: Some(pb::GameEnd {
+                scores: vec![25000, 25000, 25000, 25000],
+            }),
+            ..Default::default()
+        });
+
+        let events = bridge.handle_action("ActionLiuJu", &end).unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                Event::LiuJu {
+                    actor: Some(0),
+                    reason: 1
+                },
+                Event::EndKyoku,
+                Event::EndGame,
+            ]
+        );
     }
 
     #[test]
