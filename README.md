@@ -6,6 +6,8 @@
 
 本项目同时提供桌面 GUI 和命令行程序。程序使用邮箱账号登录雀魂，通过 Liqi websocket 协议完成匹配、进局、重连和对局操作，并由 Mortal 模型决定打牌动作。
 
+![Majsoul Autopilot 控制台预览](docs/screenshot.png)
+
 ## 功能特性
 
 - 纯协议自动化，不依赖浏览器、截图识别或坐标点击

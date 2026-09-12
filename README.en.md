@@ -6,6 +6,8 @@ A pure Rust Mahjong Soul autopilot powered by the Mortal model and the Liqi prot
 
 The project provides a desktop GUI and a command-line tool. It logs in with an email account, joins ranked four-player rooms, connects to live games through the Liqi websocket protocol, and lets a Mortal model choose actions.
 
+![Majsoul Autopilot UI Preview](docs/screenshot.png)
+
 ## Features
 
 - Pure protocol automation without browser dependencies, screenshots, or coordinate clicking
