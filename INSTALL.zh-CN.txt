@@ -1,0 +1,20 @@
+Majsoul Autopilot macOS Apple Silicon 安装说明
+
+1. 打开 Majsoul Autopilot.dmg。
+2. 将 Majsoul Autopilot.app 拖到 /Applications。
+3. 首次打开如果 macOS 提示来自未认证开发者，请在 Finder 中右键应用，选择“打开”。
+4. 图形界面会默认使用应用内置模型：models/mortal。
+5. 如果用命令行版本，可在本目录复制 settings.example.json 为 settings.json，填写账号配置后运行：
+
+   ./majsoul-autopilot-rs run --settings settings.json
+
+包内文件：
+- Majsoul Autopilot.dmg：macOS 图形界面安装包。
+- majsoul-autopilot-rs：命令行版本。
+- settings.example.json：配置示例。
+- models/mortal/model.safetensors：内置 Mortal safetensors 模型。
+- models/mortal/model_config.json：模型配置。
+
+注意：
+- 不需要安装 Python。
+- 不支持直接加载 .pth 模型；release 内置的是已转换的 safetensors 模型。

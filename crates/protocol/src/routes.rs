@@ -19,6 +19,8 @@ pub fn lobby_ws_url_candidates() -> Vec<String> {
         .collect()
 }
 
+pub const CLIENT_PLATFORM: &str = "Web";
+
 pub fn route_body(kind: u64, route_id: &str, timestamp_ms: u64) -> Vec<u8> {
     encode_blocks(&[
         ProtoBlock::Varint { id: 2, value: kind },
@@ -29,6 +31,10 @@ pub fn route_body(kind: u64, route_id: &str, timestamp_ms: u64) -> Vec<u8> {
         ProtoBlock::Varint {
             id: 4,
             value: timestamp_ms,
+        },
+        ProtoBlock::Bytes {
+            id: 6,
+            data: CLIENT_PLATFORM.as_bytes().to_vec(),
         },
     ])
 }
@@ -157,7 +163,7 @@ mod tests {
     fn route_body_matches_python_shape() {
         assert_eq!(
             hex::encode(route_body(2, "route-2", 1_717_000_000_000)),
-            "10021a07726f7574652d322080a4b3a9fc31"
+            "10021a07726f7574652d322080a4b3a9fc313203576562"
         );
     }
 

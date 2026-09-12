@@ -8,7 +8,9 @@ use prost::Message;
 
 use crate::{
     config::{match_sid, rank_tier_from_level_id, target_mode_for_rank_level, Mode, Room},
-    login::{client_version_string, login_payload},
+    login::{
+        client_version_string, login_payload_with_version, resolve_client_version, ClientVersion,
+    },
     routes::{
         game_gateway_tail, game_route_candidates, game_ws_urls, lobby_ws_url_candidates,
         prepare_login_body, request_route_candidates, route_body, route_id_from_ws_url,
@@ -71,9 +73,19 @@ pub async fn check_login(username: &str, password: &str, device_id: &str) -> Res
 
 impl ProtocolClient {
     pub async fn login(username: &str, password: &str, device_id: &str) -> Result<Self> {
+        let version = resolve_client_version().await;
+        Self::login_with_version(username, password, device_id, &version).await
+    }
+
+    pub async fn login_with_version(
+        username: &str,
+        password: &str,
+        device_id: &str,
+        version: &ClientVersion,
+    ) -> Result<Self> {
         let mut last_error = None;
         for (route_id, url) in lobby_route_options()? {
-            match Self::login_on_route(username, password, device_id, route_id, &url).await {
+            match Self::login_on_route(username, password, device_id, route_id, &url, version).await {
                 Ok(client) => return Ok(client),
                 Err(err) => last_error = Some(err),
             }
@@ -87,6 +99,7 @@ impl ProtocolClient {
         device_id: &str,
         route_id: String,
         url: &str,
+        version: &ClientVersion,
     ) -> Result<Self> {
         let mut socket = LiqiSocket::connect(&url).await?;
         let now_ms = current_time_millis();
@@ -97,7 +110,7 @@ impl ProtocolClient {
             )
             .await?;
 
-        let login = login_payload(username, password, device_id, false);
+        let login = login_payload_with_version(username, password, device_id, false, version);
         let response: pb::ResLogin = socket.request(".lq.Lobby.login", &login).await?;
         let summary = login_summary(response)?;
         let _ = socket
