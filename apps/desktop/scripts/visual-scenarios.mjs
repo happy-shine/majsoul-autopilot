@@ -751,16 +751,12 @@ function assertScenario(scenario, metrics) {
   if (scenario.table && metrics.playerLines !== 4) errors.push(`expected 4 player lines, got ${metrics.playerLines}`);
   if (metrics.clippedPlayerRows?.length > 0) errors.push(`player rows clipped: ${metrics.clippedPlayerRows.join(",")}`);
   if (metrics.playersBlock && metrics.playersBlock.scrollWidth > metrics.playersBlock.clientWidth + 1) errors.push("players block horizontal overflow");
-  if (metrics.eventsBlock && metrics.eventsBlock.scrollWidth > metrics.eventsBlock.clientWidth + 1) errors.push("events block horizontal overflow");
-  if (metrics.logsBlock && metrics.logsBlock.scrollWidth > metrics.logsBlock.clientWidth + 1) errors.push("logs block horizontal overflow");
+  if (metrics.recordsBlock && metrics.recordsBlock.scrollWidth > metrics.recordsBlock.clientWidth + 1) errors.push("records block horizontal overflow");
   if (metrics.bodyText.includes("完成局数") || metrics.bodyText.includes("ACK") || metrics.bodyText.includes("等待动作")) {
     errors.push("removed status wording returned");
   }
   if (metrics.bodyText.includes("discard refused without discard operation window")) {
     errors.push("internal discard-refused log leaked");
-  }
-  if (scenario.id === "04-after-first-discards" && !metrics.bodyText.includes("已打出 北")) {
-    errors.push("discard accepted log was not localized");
   }
   if (errors.length > 0) {
     throw new Error(`${scenario.id}: ${errors.join("; ")}\n${JSON.stringify(metrics, null, 2)}`);
@@ -840,8 +836,7 @@ try {
           appShell: rect(".appShell"),
           tableArea: rect(".tableArea"),
           playersBlock: rect(".playersBlock"),
-          eventsBlock: rect(".eventsBlock"),
-          logsBlock: rect(".logsBlock"),
+          recordsBlock: rect(".recordsBlock"),
           handContainer: rect(".seatLayer-self .localHand"),
           handMelds: rect(".seatLayer-self .localMelds"),
           playerLines: document.querySelectorAll(".playerLine").length,

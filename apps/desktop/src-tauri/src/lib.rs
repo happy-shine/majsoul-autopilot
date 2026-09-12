@@ -137,6 +137,27 @@ fn get_core_event_batch(state: State<'_, GuiState>, after: u64) -> CoreEventBatc
     state.core_events.batch_after(after)
 }
 
+#[tauri::command]
+async fn fetch_game_records(
+    state: State<'_, GuiState>,
+) -> Result<Vec<protocol::record::GameRecordSummary>, String> {
+    let settings = read_settings_unchecked(&state.settings_path).map_err(|err| err.to_string())?;
+    if settings.autoplay_account.username.trim().is_empty()
+        || settings.autoplay_account.password.trim().is_empty()
+    {
+        return Err("未配置账号或密码".to_string());
+    }
+    let mut client = protocol::session::ProtocolClient::login(
+        &settings.autoplay_account.username,
+        &settings.autoplay_account.password,
+        "rust-gui-device",
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+
+    client.fetch_game_records(10).await.map_err(|err| err.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -170,7 +191,8 @@ pub fn run() {
             stop_after_current_game,
             emergency_stop,
             get_runtime_snapshot,
-            get_core_event_batch
+            get_core_event_batch,
+            fetch_game_records
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri app");

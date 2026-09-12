@@ -142,6 +142,29 @@ export type LogItem = {
   at: number;
 };
 
+export type GameRecordPlayer = {
+  account_id: number;
+  nickname: string;
+  seat: number;
+  rank: number;
+  score: number;
+  point_change: number;
+  is_self: boolean;
+};
+
+export type GameRecordSummary = {
+  uuid: string;
+  start_time: number;
+  end_time: number;
+  mode_id: number;
+  room_name: string;
+  rank: number;
+  score: number;
+  point_change: number;
+  paipu_url: string;
+  players: GameRecordPlayer[];
+};
+
 export type CoreEvent =
   | { type: "runtime_status"; status: RuntimeStatus }
   | { type: "account_snapshot"; account: AccountSnapshot }
@@ -153,7 +176,8 @@ export type CoreEvent =
   | { type: "log"; level: "info" | "warn" | "error"; message: string }
   | { type: "game_completed"; games_done: number }
   | { type: "stop_scheduled"; after_current_game: boolean }
-  | { type: "runtime_error"; message: string };
+  | { type: "runtime_error"; message: string }
+  | { type: "game_records"; records: GameRecordSummary[] };
 
 export const defaultSettings: Settings = {
   model_path: "models/mortal",

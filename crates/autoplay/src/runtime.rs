@@ -268,6 +268,9 @@ pub async fn run_autoplay(
                 room_key(&client.summary.target_room)
             ),
         );
+        if let Ok(records) = client.fetch_game_records(10).await {
+            sink(CoreEvent::GameRecords { records });
+        }
 
         let target_mode = client.summary.target_mode.clone();
         let (game, initial_events) = connect_or_match_game(
@@ -333,6 +336,9 @@ async fn refresh_account_snapshot_after_game(
             &client.summary,
         ),
     });
+    if let Ok(records) = client.fetch_game_records(10).await {
+        sink(CoreEvent::GameRecords { records });
+    }
     emit_log(
         sink,
         LogLevel::Info,

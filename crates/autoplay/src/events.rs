@@ -16,6 +16,7 @@ pub enum CoreEvent {
     GameCompleted { games_done: u32 },
     StopScheduled { after_current_game: bool },
     RuntimeError { message: String },
+    GameRecords { records: Vec<protocol::record::GameRecordSummary> },
 }
 
 #[derive(Debug, Clone, Serialize)]

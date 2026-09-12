@@ -171,6 +171,42 @@ impl ProtocolClient {
         Ok(self.summary.clone())
     }
 
+    pub async fn fetch_game_record_list(
+        &mut self,
+        start: u32,
+        count: u32,
+        record_type: u32,
+    ) -> Result<pb::ResGameRecordList> {
+        let response: pb::ResGameRecordList = self
+            .socket
+            .request(
+                ".lq.Lobby.fetchGameRecordList",
+                &pb::ReqGameRecordList {
+                    start,
+                    count,
+                    r#type: record_type,
+                },
+            )
+            .await?;
+        if let Some(ref error) = response.error {
+            if error.code != 0 {
+                return Err(anyhow!("fetchGameRecordList failed: code={}", error.code));
+            }
+        }
+        Ok(response)
+    }
+
+    pub async fn fetch_game_records(
+        &mut self,
+        count: u32,
+    ) -> Result<Vec<crate::record::GameRecordSummary>> {
+        let res = self.fetch_game_record_list(0, count, 0).await?;
+        Ok(crate::record::parse_game_record_list(
+            res,
+            self.summary.account_id,
+        ))
+    }
+
     pub async fn start_match(&mut self) -> Result<StartMatchResult> {
         self.prepare_game_route().await?;
         let sid = match_sid(&self.summary.target_mode, &self.summary.target_room)

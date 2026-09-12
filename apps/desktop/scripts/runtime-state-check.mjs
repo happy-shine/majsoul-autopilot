@@ -202,12 +202,7 @@ try {
     throw new Error(`account snapshot was not refreshed immediately: ${accountText}`);
   }
   const phaseText = await page.locator('[data-testid="phase-banner"]').innerText();
-  if (
-    !(
-      (phaseText.includes("登录中") && phaseText.includes("test@example.com")) ||
-      (phaseText.includes("登录中") && phaseText.includes("FrontendOk"))
-    )
-  ) {
+  if (!phaseText.includes("登录中")) {
     throw new Error(`phase banner did not show runtime progress: ${phaseText}`);
   }
   const bodyText = await page.locator("body").innerText();

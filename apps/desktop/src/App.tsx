@@ -5,14 +5,18 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle,
   Bot,
+  Check,
   CircleHelp,
   CircleDot,
+  Copy,
   Gauge,
   KeyRound,
   Languages,
   Play,
   RadioTower,
+  RefreshCw,
   Save,
+  ScrollText,
   Shield,
   Square,
   TimerReset,
@@ -23,6 +27,7 @@ import { copy, languageNames } from "./i18n";
 import { useAppStore } from "./store";
 import type {
   CoreEventBatch,
+  GameRecordSummary,
   Language,
   ModeChoice,
   ModelChoice,
@@ -83,6 +88,8 @@ export function App() {
     logs,
     events,
     account,
+    gameRecords,
+    setGameRecords,
     stopScheduled,
     ingest,
   } = useAppStore();
@@ -98,9 +105,103 @@ export function App() {
   ]);
   const [runtimeRunning, setRuntimeRunning] = useState(false);
   const [emergencyConfirmOpen, setEmergencyConfirmOpen] = useState(false);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
   const lastSavedSettings = useRef(JSON.stringify(normalizeSettings(settings)));
   const lastSnapshotError = useRef<string | null>(null);
   const coreEventCursor = useRef(0);
+
+  const refreshGameRecords = async () => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    setRecordsLoading(true);
+    try {
+      const records = await invoke<GameRecordSummary[]>("fetch_game_records");
+      setGameRecords(records);
+    } catch (err) {
+      ingest({ type: "log", level: "warn", message: `fetch records failed: ${String(err)}` });
+    } finally {
+      setRecordsLoading(false);
+    }
+  };
+
+  const copyPaipuUrl = async (record: GameRecordSummary) => {
+    try {
+      await navigator.clipboard.writeText(record.paipu_url);
+      setCopiedUuid(record.uuid);
+      setTimeout(() => setCopiedUuid(null), 2000);
+    } catch (err) {
+      console.error("copy failed", err);
+    }
+  };
+
+  useEffect(() => {
+    if (!isTauriRuntime() || !settingsReady) {
+      return;
+    }
+    if (settings.autoplay_account.username && settings.autoplay_account.password) {
+      void refreshGameRecords();
+    }
+  }, [settingsReady]);
+
+  useEffect(() => {
+    if (isTauriRuntime()) {
+      return;
+    }
+    if (gameRecords.length === 0) {
+      setGameRecords([
+        {
+          uuid: "260912-8259aca0-a3f1-4901-946d-da20c59bd0bc",
+          start_time: 1726140000,
+          end_time: 1726141800,
+          mode_id: 12,
+          room_name: "玉之间 四人南",
+          rank: 1,
+          score: 44700,
+          point_change: 145,
+          paipu_url: "https://game.maj-soul.com/1/?paipu=260912-8259aca0-a3f1-4901-946d-da20c59bd0bc_a14244521",
+          players: [],
+        },
+        {
+          uuid: "260609-66835b36-aa82-422e-a14d-9316863298f8",
+          start_time: 1726130000,
+          end_time: 1726131800,
+          mode_id: 12,
+          room_name: "玉之间 四人南",
+          rank: 2,
+          score: 31600,
+          point_change: 67,
+          paipu_url: "https://game.maj-soul.com/1/?paipu=260609-66835b36-aa82-422e-a14d-9316863298f8_a14244521",
+          players: [],
+        },
+        {
+          uuid: "260609-94056dfa-c267-4034-81a8-88f833d7a97a",
+          start_time: 1726120000,
+          end_time: 1726121800,
+          mode_id: 12,
+          room_name: "玉之间 四人南",
+          rank: 3,
+          score: 22900,
+          point_change: -7,
+          paipu_url: "https://game.maj-soul.com/1/?paipu=260609-94056dfa-c267-4034-81a8-88f833d7a97a_a14244521",
+          players: [],
+        },
+        {
+          uuid: "260913-57c2689f-b011-4d4c-b3b4-78d06e5c1307",
+          start_time: 1726110000,
+          end_time: 1726111800,
+          mode_id: 12,
+          room_name: "玉之间 四人南",
+          rank: 4,
+          score: 0,
+          point_change: -205,
+          paipu_url: "https://game.maj-soul.com/1/?paipu=260913-57c2689f-b011-4d4c-b3b4-78d06e5c1307_a14244521",
+          players: [],
+        },
+      ]);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -405,7 +506,7 @@ export function App() {
           ))}
         </div>
 
-        <div className={`statusBeacon status-${status}`}>
+        <div className={`statusBeacon status-${status}`} data-testid="phase-banner">
           <CircleDot size={15} />
           <span>{statusText}</span>
         </div>
@@ -680,20 +781,6 @@ export function App() {
         </section>
 
         <aside className="telemetryRail">
-          <div className={`phaseBanner status-${status}`} data-testid="phase-banner">
-            <div>
-              <span>{t.statusLabel}</span>
-              <strong>{statusText}</strong>
-            </div>
-            <p>
-              {account?.refreshing
-                ? `${t.accountRefreshing}: ${accountName}`
-                : account?.nickname
-                  ? `${account.nickname} · ${accountTarget}`
-                  : t.accountWaiting}
-            </p>
-          </div>
-
           <TelemetryBlock title={t.players} icon={<Shield size={16} />} className="playersBlock">
             <div className="accountSnapshot liveAccount" data-testid="account-snapshot">
               <div>
@@ -718,34 +805,82 @@ export function App() {
                 </div>
               </dl>
             </div>
-            {(table?.players ?? []).map((player) => (
-              <div className="playerLine" key={player.seat}>
-                <span>{playerRelation(player.seat, table?.seat, t)}</span>
-                <strong>{player.points}</strong>
-                <em>#{player.seat}</em>
-                <small>{player.riichi ? t.riichi : ""}</small>
+            {(table?.players ?? []).length > 0 && (
+              <div className="liveMatchPlayers">
+                {(table?.players ?? []).map((player) => (
+                  <div className="playerLine" key={player.seat}>
+                    <span>{playerRelation(player.seat, table?.seat, t)}</span>
+                    <strong>{player.points}</strong>
+                    <em>#{player.seat}</em>
+                    <small>{player.riichi ? t.riichi : ""}</small>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </TelemetryBlock>
 
-          <TelemetryBlock title={t.eventStream} icon={<RadioTower size={16} />} className="eventsBlock">
-            <div className="eventStream">
-              {events.slice(0, 10).map((event, index) => (
-                <code key={index}>{JSON.stringify(event)}</code>
-              ))}
+          <section className="telemetryBlock recordsBlock">
+            <div className="telemetryTitle">
+              <div className="recordsTitleLeft">
+                <ScrollText size={16} />
+                <h2>{t.gameRecords}</h2>
+              </div>
+              <button
+                type="button"
+                className="recordRefreshBtn"
+                onClick={() => void refreshGameRecords()}
+                disabled={recordsLoading}
+                title={t.refreshRecords}
+              >
+                <RefreshCw size={13} className={recordsLoading ? "spinning" : ""} />
+                <span>{recordsLoading ? t.refreshingRecords : t.refreshRecords}</span>
+              </button>
             </div>
-          </TelemetryBlock>
 
-          <TelemetryBlock title={t.logs} icon={<AlertTriangle size={16} />} className="logsBlock">
-            <div className="logList">
-              {logs.slice(0, 7).map((log, index) => (
-                <p key={index} className={`log-${log.level}`}>
-                  {log.level === "error" ? <AlertTriangle size={14} /> : null}
-                  {new Date(log.at).toLocaleTimeString()} {formatLogMessage(log.message, language)}
-                </p>
-              ))}
+            <div className="recordsList">
+              {gameRecords.length === 0 ? (
+                <div className="emptyRecords">
+                  <p>{recordsLoading ? t.refreshingRecords : t.noGameRecords}</p>
+                </div>
+              ) : (
+                gameRecords.map((record) => {
+                  const isCopied = copiedUuid === record.uuid;
+                  return (
+                    <div className="recordCard" key={record.uuid}>
+                      <div className="recordHead">
+                        <div className="recordHeadLeft">
+                          <span className={`rankPill rank-${record.rank}`}>{formatPlacement(record.rank, language)}</span>
+                          <span className="recordRoom">{formatRoomMode(record.mode_id, record.room_name, language)}</span>
+                        </div>
+                        <span className="recordTime">{formatRecordTime(record.end_time || record.start_time)}</span>
+                      </div>
+                      <div className="recordBody">
+                        <div className="recordStats">
+                          <span className="recordScore">
+                            {record.score.toLocaleString()} {t.points.trim()}
+                          </span>
+                          <span className={`recordPt ${record.point_change >= 0 ? "positive" : "negative"}`}>
+                            {record.point_change > 0 ? `+${record.point_change}` : record.point_change} pt
+                          </span>
+                        </div>
+                        <div className="recordActions">
+                          <button
+                            type="button"
+                            className={`actionBtn copyBtn ${isCopied ? "copied" : ""}`}
+                            onClick={() => void copyPaipuUrl(record)}
+                            title={t.copyPaipu}
+                          >
+                            {isCopied ? <Check size={12} /> : <Copy size={12} />}
+                            <span>{isCopied ? t.copied : t.copyPaipu}</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
-          </TelemetryBlock>
+          </section>
         </aside>
       </main>
       {emergencyConfirmOpen ? (
@@ -1001,4 +1136,88 @@ function TelemetryBlock({
       {children}
     </section>
   );
+}
+
+function formatRecordTime(timestamp: number) {
+  if (!timestamp) return "";
+  const d = new Date(timestamp * 1000);
+  const m = (d.getMonth() + 1).toString().padStart(2, "0");
+  const day = d.getDate().toString().padStart(2, "0");
+  const h = d.getHours().toString().padStart(2, "0");
+  const min = d.getMinutes().toString().padStart(2, "0");
+  return `${m}-${day} ${h}:${min}`;
+}
+
+function formatPlacement(rank: number, language: Language): string {
+  if (language === "en") {
+    if (rank === 1) return "1st";
+    if (rank === 2) return "2nd";
+    if (rank === 3) return "3rd";
+    return `${rank}th`;
+  }
+  return `${rank}位`;
+}
+
+const MODE_NAME_MAP: Record<number, Record<Language, string>> = {
+  2: { zh: "铜之间 四人东", en: "Bronze 4-player East", ja: "銅の間 四人東" },
+  3: { zh: "铜之间 四人南", en: "Bronze 4-player South", ja: "銅の間 四人南" },
+  5: { zh: "银之间 四人东", en: "Silver 4-player East", ja: "銀の間 四人東" },
+  6: { zh: "银之间 四人南", en: "Silver 4-player South", ja: "銀の間 四人南" },
+  8: { zh: "金之间 四人东", en: "Gold 4-player East", ja: "金の間 四人東" },
+  9: { zh: "金之间 四人南", en: "Gold 4-player South", ja: "金の間 四人南" },
+  11: { zh: "玉之间 四人东", en: "Jade 4-player East", ja: "玉の間 四人東" },
+  12: { zh: "玉之间 四人南", en: "Jade 4-player South", ja: "玉の間 四人南" },
+  15: { zh: "王座之间 四人东", en: "Throne 4-player East", ja: "王座の間 四人東" },
+  16: { zh: "王座之间 四人南", en: "Throne 4-player South", ja: "王座の間 四人南" },
+  21: { zh: "铜之间 三人东", en: "Bronze 3-player East", ja: "銅の間 三人東" },
+  22: { zh: "铜之间 三人南", en: "Bronze 3-player South", ja: "銅の間 三人南" },
+  23: { zh: "银之间 三人东", en: "Silver 3-player East", ja: "銀の間 三人東" },
+  24: { zh: "银之间 三人南", en: "Silver 3-player South", ja: "銀の間 三人南" },
+  25: { zh: "金之间 三人东", en: "Gold 3-player East", ja: "金の間 三人東" },
+  26: { zh: "金之间 三人南", en: "Gold 3-player South", ja: "金の間 三人南" },
+  27: { zh: "玉之间 三人东", en: "Jade 3-player East", ja: "玉の間 三人東" },
+  28: { zh: "玉之间 三人南", en: "Jade 3-player South", ja: "玉の間 三人南" },
+  29: { zh: "王座之间 三人东", en: "Throne 3-player East", ja: "王座の間 三人東" },
+  30: { zh: "王座之间 三人南", en: "Throne 3-player South", ja: "王座の間 三人南" },
+};
+
+function formatRoomMode(modeId: number, roomNameFallback: string, language: Language): string {
+  const mapped = MODE_NAME_MAP[modeId];
+  if (mapped && mapped[language]) {
+    return mapped[language];
+  }
+
+  const fallback = roomNameFallback || (modeId > 0 ? `段位战 (${modeId})` : "段位战");
+
+  if (language === "en") {
+    return fallback
+      .replace("段位战", "Ranked")
+      .replace("铜之间", "Bronze")
+      .replace("银之间", "Silver")
+      .replace("金之间", "Gold")
+      .replace("玉之间", "Jade")
+      .replace("王座之间", "Throne")
+      .replace("王座间", "Throne")
+      .replace("四人东", "4-player East")
+      .replace("四人南", "4-player South")
+      .replace("三人东", "3-player East")
+      .replace("三人南", "3-player South");
+  }
+
+  if (language === "ja") {
+    return fallback
+      .replace("段位战", "段位戦")
+      .replace("铜之间", "銅の間")
+      .replace("银之间", "銀の間")
+      .replace("金之间", "金の間")
+      .replace("玉之间", "玉の間")
+      .replace("王座之间", "王座の間")
+      .replace("王座间", "王座の間")
+      .replace("四人东", "四人東")
+      .replace("四人南", "四人南")
+      .replace("三人东", "三人東")
+      .replace("三人南", "三人南");
+  }
+
+  return fallback;
 }

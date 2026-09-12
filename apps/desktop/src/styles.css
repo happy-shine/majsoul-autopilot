@@ -1529,8 +1529,8 @@ select:disabled {
 .telemetryRail {
   min-height: 0;
   padding: 12px;
-  display: grid;
-  grid-template-rows: 332px minmax(150px, 1fr) minmax(150px, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   overflow: hidden;
 }
@@ -1545,13 +1545,8 @@ select:disabled {
 }
 
 .playersBlock {
-  height: 332px;
-}
-
-.eventsBlock,
-.logsBlock {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  height: auto;
+  flex-shrink: 0;
 }
 
 .playerLine {
@@ -2050,26 +2045,9 @@ select:disabled {
 }
 
 .telemetryRail {
-  grid-template-rows: 98px 350px minmax(116px, 1fr) minmax(116px, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-}
-
-.telemetryRail > .phaseBanner {
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr;
-  align-content: center;
-  gap: 6px;
-  padding: 10px 12px;
-}
-
-.telemetryRail > .phaseBanner strong {
-  font-size: 18px;
-}
-
-.telemetryRail > .phaseBanner p {
-  white-space: normal;
-  line-height: 1.35;
 }
 
 /* Final table placement pass: hands stay outer, rivers tuck toward the table center. */
@@ -2167,7 +2145,8 @@ select:disabled {
 }
 
 .telemetryRail {
-  grid-template-rows: 100px 392px minmax(110px, 1fr) minmax(110px, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 10px;
 }
@@ -2178,10 +2157,9 @@ select:disabled {
 
 .playersBlock {
   height: auto;
-  overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto repeat(4, 24px);
-  align-content: start;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
   gap: 4px;
 }
 
@@ -3728,15 +3706,21 @@ select:disabled {
   backdrop-filter: blur(18px) !important;
 }
 
-.panelTitle,
-.telemetryTitle {
+.panelTitle {
   color: #14715f !important;
 }
 
+.telemetryTitle {
+  color: #334155 !important;
+}
+
 .panelTitle svg,
-.telemetryTitle svg,
 .languageSwitch svg {
   color: #14715f !important;
+}
+
+.telemetryTitle svg {
+  color: #64748b !important;
 }
 
 .languageSwitch button.active {
@@ -3774,8 +3758,10 @@ select:disabled {
 
 .accountSnapshot small,
 .accountSnapshot small.isRefreshing {
-  background: #eef6f3 !important;
-  color: #126b5a !important;
+  background: #f1f5f9 !important;
+  color: #475569 !important;
+  border-radius: 4px !important;
+  font-weight: 500 !important;
 }
 
 .saveButton {
@@ -3950,4 +3936,268 @@ button.danger {
   border-color: rgba(23, 125, 105, 0.3) !important;
   background: linear-gradient(180deg, #f3faf7 0%, #dff0eb 100%) !important;
   color: #126b5a !important;
+}
+
+/* Game records / Paipu panel styles - minimal desktop utility design */
+.recordsBlock {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.recordsBlock .telemetryTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 0 1px;
+}
+
+.recordsTitleLeft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #334155 !important;
+}
+
+.recordsTitleLeft svg {
+  color: #64748b !important;
+}
+
+.recordsTitleLeft h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b !important;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.recordRefreshBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  border: 1px solid transparent !important;
+  border-radius: 4px !important;
+  background: transparent !important;
+  color: #64748b !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.recordRefreshBtn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05) !important;
+  color: #0f172a !important;
+  border-color: transparent !important;
+}
+
+.recordRefreshBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.recordRefreshBtn .spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.recordsList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-right: 2px;
+}
+
+.recordsList::-webkit-scrollbar {
+  width: 4px;
+}
+
+.recordsList::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 4px;
+}
+
+.recordsList::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.emptyRecords {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.recordCard {
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 6px;
+  padding: 6px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: none;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.recordCard:hover {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.recordHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.recordHeadLeft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rankPill {
+  min-width: 20px;
+  height: 18px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  border: none !important;
+}
+
+.rankPill.rank-1 {
+  background: #bbf7d0;
+  color: #14532d;
+}
+
+.rankPill.rank-2 {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.rankPill.rank-3 {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.rankPill.rank-4 {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.recordRoom {
+  font-weight: 500;
+  color: #334155;
+  font-size: 12px;
+}
+
+.recordTime {
+  font-size: 11px;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+.recordBody {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.recordStats {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.recordScore {
+  font-weight: 600;
+  color: #0f172a;
+  white-space: nowrap;
+}
+
+.recordPt {
+  font-weight: 600;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.recordPt.positive {
+  color: #16a34a;
+}
+
+.recordPt.negative {
+  color: #dc2626;
+}
+
+.recordActions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.recordActions .actionBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px !important;
+  border-radius: 4px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  white-space: nowrap;
+  cursor: pointer;
+  background: transparent !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  color: #64748b !important;
+  box-shadow: none !important;
+  transition: all 0.12s ease;
+}
+
+.recordActions .actionBtn:hover {
+  background: #ffffff !important;
+  color: #0f172a !important;
+  border-color: rgba(0, 0, 0, 0.18) !important;
+}
+
+.recordActions .copyBtn.copied {
+  background: #f0fdf4 !important;
+  border-color: #86efac !important;
+  color: #16a34a !important;
+}
+
+.liveMatchPlayers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
 }

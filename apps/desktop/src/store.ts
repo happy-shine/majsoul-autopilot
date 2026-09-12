@@ -21,9 +21,11 @@ type AppStore = {
   logs: LogItem[];
   ack: ActionAck | null;
   account: AccountSnapshot | null;
+  gameRecords: import("./types").GameRecordSummary[];
   stopScheduled: boolean;
   setSettings: (settings: Settings) => void;
   patchSettings: (patch: Partial<Settings>) => void;
+  setGameRecords: (records: import("./types").GameRecordSummary[]) => void;
   ingest: (event: CoreEvent) => void;
 };
 
@@ -56,6 +58,7 @@ export const useAppStore = create<AppStore>((set) => ({
   logs: [],
   ack: null,
   account: null,
+  gameRecords: [],
   stopScheduled: false,
   setSettings: (settings) => set({ settings }),
   patchSettings: (patch) =>
@@ -65,6 +68,7 @@ export const useAppStore = create<AppStore>((set) => ({
         ...patch,
       },
     })),
+  setGameRecords: (gameRecords) => set({ gameRecords }),
   ingest: (event) =>
     set((state) => {
       switch (event.type) {
@@ -108,6 +112,8 @@ export const useAppStore = create<AppStore>((set) => ({
           return {
             logs: prependLog(state.logs, { level: event.level, message: event.message }),
           };
+        case "game_records":
+          return { gameRecords: event.records };
         default:
           return {};
       }

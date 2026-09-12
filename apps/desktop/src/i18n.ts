@@ -70,6 +70,13 @@ type Copy = {
   winningMelds: string;
   eventStream: string;
   logs: string;
+  gameRecords: string;
+  copyPaipu: string;
+  copied: string;
+  openInMortal: string;
+  noGameRecords: string;
+  refreshRecords: string;
+  refreshingRecords: string;
   modelDecision: string;
   modelDiscard: string;
   modelReach: string;
@@ -172,6 +179,13 @@ export const copy: Record<Language, Copy> = {
     winningMelds: "副露",
     eventStream: "结构化事件",
     logs: "日志",
+    gameRecords: "近期牌谱",
+    copyPaipu: "复制牌谱",
+    copied: "已复制",
+    openInMortal: "Mortal 跑谱",
+    noGameRecords: "暂无牌谱记录",
+    refreshRecords: "刷新牌谱",
+    refreshingRecords: "正在拉取...",
     modelDecision: "模型推荐",
     modelDiscard: "打出",
     modelReach: "立直",
@@ -290,6 +304,13 @@ export const copy: Record<Language, Copy> = {
     winningMelds: "Open melds",
     eventStream: "Structured events",
     logs: "Logs",
+    gameRecords: "Recent Matches",
+    copyPaipu: "Copy Paipu",
+    copied: "Copied",
+    openInMortal: "Review in Mortal",
+    noGameRecords: "No match records yet",
+    refreshRecords: "Refresh",
+    refreshingRecords: "Fetching...",
     modelDecision: "Model recommendation",
     modelDiscard: "Discard",
     modelReach: "Riichi",
@@ -408,6 +429,13 @@ export const copy: Record<Language, Copy> = {
     winningMelds: "副露",
     eventStream: "構造化イベント",
     logs: "ログ",
+    gameRecords: "直近の牌譜",
+    copyPaipu: "牌譜をコピー",
+    copied: "コピー済",
+    openInMortal: "Mortal で検討",
+    noGameRecords: "牌譜記録はありません",
+    refreshRecords: "牌譜を更新",
+    refreshingRecords: "取得中...",
     modelDecision: "モデル推奨",
     modelDiscard: "打牌",
     modelReach: "リーチ",
