@@ -2,7 +2,7 @@
 
 [中文文档](README.md)
 
-A pure Rust Mahjong Soul autopilot powered by the Mortal model and the Liqi protocol.
+A pure Rust Mahjong Soul autopilot powered by the Mortal model and the Liqi protocol. Extremely compact package size, zero Python or browser dependencies, ready to use out of the box.
 
 The project provides a desktop GUI and a command-line tool. It logs in with an email account, joins ranked four-player rooms, connects to live games through the Liqi websocket protocol, and lets a Mortal model choose actions.
 
@@ -10,16 +10,16 @@ The project provides a desktop GUI and a command-line tool. It logs in with an e
 
 ## Features
 
-- Pure protocol automation without browser dependencies, screenshots, or coordinate clicking
-- Dynamic client & resource version detection (adapts to game updates automatically)
-- Four-player ranked matchmaking
-- Automatic room selection by rank (Bronze / Silver / Gold / Jade / Throne)
-- Native Mortal inference with Candle (pure Rust, no Python runtime needed)
-- Tauri desktop GUI for settings, status, logs, and table view
-- Reconnect support for active games
-- Riichi declaration handling with Mortal's two-step decision flow
-- Stale operation guard and discard acknowledgement checks
-- Robust game-end handling (dealer agari-yame, tobu bankrupt detection, server code 1204 tolerance)
+- **Extremely lightweight & out-of-the-box**: Pure Rust architecture with minimal bundle size; no Python environment or browser drivers required
+- **Pure protocol automation**: Direct communication via Liqi websocket protocol without browser automation, screenshots, or coordinate clicking
+- **Dynamic version detection**: Automatically discovers and tracks official client and resource versions without manual updates
+- **Four-player ranked matchmaking**: Automatic room selection based on account rank (Bronze / Silver / Gold / Jade / Throne)
+- **Native Mortal inference**: Uses Candle for native model inference without Python runtimes
+- **Modern desktop GUI**: Clean Tauri console for configuration, status monitoring, live logs, and table view
+- **Active game reconnect**: Supports reconnecting and state recovery for ongoing matches
+- **Riichi two-step decision**: Full support for Mortal's riichi declaration and discard sequence
+- **Operation guards**: Stale operation window guards and discard acknowledgement validation
+- **Robust game-end handling**: Comprehensive end-of-game logic (dealer agari-yame, bankrupt tobu detection, server code 1204 tolerance)
 
 ## Room Policy
 
