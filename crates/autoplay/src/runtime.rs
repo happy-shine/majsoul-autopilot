@@ -490,8 +490,12 @@ async fn run_game_loop(
         if initial_events.last().is_some_and(|event| {
             should_confirm_new_round_after_event(mode, event, &VecDeque::new(), &table.snapshot())
         }) {
-            queue.extend(confirm_new_round(&mut game, sink).await?);
-            waiting_for_new_round_since = Some(Instant::now());
+            let new_events = confirm_new_round(&mut game, sink).await?;
+            let is_ending = new_events.iter().any(|e| matches!(e, bridge::Event::EndGame));
+            queue.extend(new_events);
+            if !is_ending {
+                waiting_for_new_round_since = Some(Instant::now());
+            }
         } else if initial_events.last().is_some_and(|event| {
             is_terminal_all_last_after_end_kyoku(mode, event, &table.snapshot())
         }) {
@@ -541,8 +545,12 @@ async fn run_game_loop(
         let table_snapshot = table.snapshot();
         if should_confirm_new_round_after_event(mode, &event, &queue, &table_snapshot) {
             let _ = bot.react(&event)?;
-            queue.extend(confirm_new_round(&mut game, sink).await?);
-            waiting_for_new_round_since = Some(Instant::now());
+            let new_events = confirm_new_round(&mut game, sink).await?;
+            let is_ending = new_events.iter().any(|e| matches!(e, bridge::Event::EndGame));
+            queue.extend(new_events);
+            if !is_ending {
+                waiting_for_new_round_since = Some(Instant::now());
+            }
             continue;
         }
         if is_terminal_all_last_after_end_kyoku(mode, &event, &table_snapshot) {
@@ -851,7 +859,18 @@ async fn confirm_new_round(
 ) -> Result<Vec<bridge::Event>> {
     let started_at = Instant::now();
     emit_log(sink, LogLevel::Info, "round ended; confirming new round");
-    check_common_error(game.confirm_new_round().await?, "confirmNewRound")?;
+    let res = game.confirm_new_round().await?;
+    if let Some(ref error) = res.error {
+        if error.code == 1204 {
+            emit_log(
+                sink,
+                LogLevel::Info,
+                "game already ended on server (confirmNewRound code=1204); ending game",
+            );
+            return Ok(vec![bridge::Event::EndGame]);
+        }
+    }
+    check_common_error(res, "confirmNewRound")?;
     emit_log(
         sink,
         LogLevel::Info,
@@ -1075,12 +1094,41 @@ fn is_terminal_all_last_after_end_kyoku(
     event: &bridge::Event,
     table: &TableSnapshot,
 ) -> bool {
-    matches!(event, bridge::Event::EndKyoku)
-        && is_all_last(mode, table)
-        && matches!(
-            table.last_event,
-            Some(bridge::Event::Hule { actor, .. }) if actor != table.oya
-        )
+    if !matches!(event, bridge::Event::EndKyoku) {
+        return false;
+    }
+    match &table.last_event {
+        Some(bridge::Event::Hule {
+            actor,
+            target,
+            point_sum,
+            ..
+        }) => {
+            if let Some(target_seat) = target {
+                let target_score = table.scores.get(*target_seat as usize).copied().unwrap_or(0);
+                if target_score < *point_sum as i32 {
+                    return true;
+                }
+            }
+            if !is_all_last(mode, table) {
+                return false;
+            }
+            if *actor != table.oya {
+                true
+            } else {
+                let oya_idx = table.oya as usize;
+                let oya_score = table.scores.get(oya_idx).copied().unwrap_or(0);
+                let est_oya_score = oya_score + *point_sum as i32;
+                let is_top = table
+                    .scores
+                    .iter()
+                    .enumerate()
+                    .all(|(idx, &score)| idx == oya_idx || est_oya_score > score);
+                est_oya_score >= 30_000 && is_top
+            }
+        }
+        _ => false,
+    }
 }
 
 fn is_all_last(mode: &Mode, table: &TableSnapshot) -> bool {
@@ -1506,6 +1554,111 @@ mod tests {
             fu: 30,
             fans: Vec::new(),
             point_sum: 26_300,
+            hand: vec![],
+            ming: vec![],
+        });
+
+        assert!(!should_confirm_new_round_after_event(
+            &Mode::FourPlayerSouth,
+            &bridge::Event::EndKyoku,
+            &VecDeque::new(),
+            &table.snapshot()
+        ));
+    }
+
+    #[test]
+    fn south_four_dealer_top_hule_does_not_confirm_new_round() {
+        let mut table = TableTracker::new(3);
+        table.apply(&bridge::Event::StartKyoku {
+            bakaze: "S".to_string(),
+            dora_marker: "5m".to_string(),
+            honba: 0,
+            kyoku: 4,
+            kyotaku: 0,
+            oya: 3,
+            scores: vec![21_300, 15_400, 31_000, 32_300],
+            tehais: vec![vec![]; 4],
+        });
+        table.apply(&bridge::Event::Hule {
+            actor: 3,
+            target: Some(0),
+            pai: "7s".to_string(),
+            zimo: false,
+            title: String::new(),
+            count: 4,
+            fu: 40,
+            fans: Vec::new(),
+            point_sum: 22_600,
+            hand: vec![],
+            ming: vec![],
+        });
+
+        assert!(!should_confirm_new_round_after_event(
+            &Mode::FourPlayerSouth,
+            &bridge::Event::EndKyoku,
+            &VecDeque::new(),
+            &table.snapshot()
+        ));
+    }
+
+    #[test]
+    fn south_four_dealer_behind_hule_confirms_new_round() {
+        let mut table = TableTracker::new(3);
+        table.apply(&bridge::Event::StartKyoku {
+            bakaze: "S".to_string(),
+            dora_marker: "5m".to_string(),
+            honba: 0,
+            kyoku: 4,
+            kyotaku: 0,
+            oya: 3,
+            scores: vec![45_000, 15_000, 15_000, 10_000],
+            tehais: vec![vec![]; 4],
+        });
+        table.apply(&bridge::Event::Hule {
+            actor: 3,
+            target: Some(1),
+            pai: "2m".to_string(),
+            zimo: false,
+            title: String::new(),
+            count: 1,
+            fu: 30,
+            fans: Vec::new(),
+            point_sum: 4_000,
+            hand: vec![],
+            ming: vec![],
+        });
+
+        assert!(should_confirm_new_round_after_event(
+            &Mode::FourPlayerSouth,
+            &bridge::Event::EndKyoku,
+            &VecDeque::new(),
+            &table.snapshot()
+        ));
+    }
+
+    #[test]
+    fn bankrupt_hule_does_not_confirm_new_round() {
+        let mut table = TableTracker::new(0);
+        table.apply(&bridge::Event::StartKyoku {
+            bakaze: "E".to_string(),
+            dora_marker: "1m".to_string(),
+            honba: 0,
+            kyoku: 1,
+            kyotaku: 0,
+            oya: 0,
+            scores: vec![25_000, 5_000, 25_000, 25_000],
+            tehais: vec![vec![]; 4],
+        });
+        table.apply(&bridge::Event::Hule {
+            actor: 0,
+            target: Some(1),
+            pai: "1m".to_string(),
+            zimo: false,
+            title: String::new(),
+            count: 3,
+            fu: 40,
+            fans: Vec::new(),
+            point_sum: 8_000,
             hand: vec![],
             ming: vec![],
         });
