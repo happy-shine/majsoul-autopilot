@@ -1,91 +1,77 @@
 # majsoul-autopilot
 
-[中文文档](README.zh-CN.md)
+[English](README.en.md)
 
-A pure Rust Mahjong Soul autopilot powered by the Mortal model and the Liqi protocol.
+一个基于 Mortal 模型和 Liqi 协议的纯 Rust 雀魂自动打牌工具。
 
-The project provides a desktop GUI and a command-line tool. It logs in with an email account, joins ranked four-player rooms, connects to live games through the Liqi websocket protocol, and lets a Mortal model choose actions.
+本项目同时提供桌面 GUI 和命令行程序。程序使用邮箱账号登录雀魂，通过 Liqi websocket 协议完成匹配、进局、重连和对局操作，并由 Mortal 模型决定打牌动作。
 
-## Features
+## 功能特性
 
-- Pure protocol automation for Mahjong Soul
-- Four-player ranked matchmaking
-- Automatic room selection by rank
-- Native Mortal inference with Candle
-- Tauri desktop GUI for settings, status, logs, and table view
-- Reconnect support for active games
-- Riichi declaration handling with Mortal's two-step decision flow
-- Stale operation guard and discard acknowledgement checks
-- No browser automation, screenshots, or coordinate clicking
+- 纯协议自动化，不依赖浏览器、截图识别或坐标点击
+- 动态自动检测官方版本（支持客户端版本与资源版本自适应，游戏更新无需发版）
+- 支持四人段位场匹配
+- 按账号段位自动选择目标房间（铜/银/金/玉/王座）
+- 使用 Candle 进行 Mortal 原生推理（纯 Rust，不需要 Python 运行环境）
+- 提供 Tauri 桌面 GUI，用于配置、状态、日志和牌桌查看
+- 支持已有对局重连
+- 支持 Mortal 立直二段决策流程
+- 包含 operation 过期保护和弃牌 ACK 校验
+- 完善的对局结算与终局判定（支持庄家和了止め、击飞即时判定及服务端终局容错）
 
-## Room Policy
+## 房间策略
 
-The runner selects a target room from the account rank:
+程序会根据账号段位自动选择房间：
 
-| Rank | Mode |
+| 段位 | 目标房间 |
 | --- | --- |
-| Below Adept | Bronze Room, East game |
-| Adept | Silver Room, South game |
-| Expert or higher | Gold Room, South game |
+| 初心（未到雀士） | 铜之间四人东 |
+| 雀士 | 银之间四人南 |
+| 雀杰 | 金之间四人南 |
+| 雀圣 | 玉之间四人南 |
+| 魂天 | 王座之间四人南 |
 
-Three-player mode is not supported.
+当前不支持三人麻将入口。
 
-## Download
+## 下载
 
-Prebuilt macOS Apple Silicon packages are available from GitHub Releases:
+macOS Apple Silicon 预编译包可以在 GitHub Releases 下载：
 
-[Download the latest release](https://github.com/happy-shine/majsoul-autopilot/releases/latest)
+[下载最新版本](https://github.com/happy-shine/majsoul-autopilot/releases/latest)
 
-Two macOS arm64 packages are published:
-
-- `majsoul-autopilot-gui-macos-arm64.zip`: desktop app plus the CLI binary
-- `majsoul-autopilot-rs-macos-arm64.zip`: CLI-only package with the original layout
-
-The GUI package contains:
+包内包含：
 
 ```text
-majsoul-autopilot-gui-macos-arm64/
-  Majsoul Autopilot.app
-  majsoul-autopilot-rs
-  settings.example.json
-  README.md
-  README.zh-CN.md
+majsoul-autopilot-macos-arm64/
+  Majsoul Autopilot.dmg     # macOS 桌面图形界面安装包
+  majsoul-autopilot-rs      # 命令行程序
+  settings.example.json     # 配置示例
+  INSTALL.zh-CN.txt         # 安装与使用说明
   models/
-    mortal-298k/
-      model.safetensors
-      model_config.json
+    mortal/
+      model.safetensors     # Mortal safetensors 模型
+      model_config.json     # 模型配置
 ```
 
-The CLI package contains:
+## 快速开始
 
-```text
-majsoul-autopilot-rs-macos-arm64/
-  majsoul-autopilot-rs
-  settings.example.json
-  README.md
-  README.zh-CN.md
-  models/
-    mortal-298k/
-      model.safetensors
-      model_config.json
-```
+### 桌面 GUI 版
+1. 打开 `Majsoul Autopilot.dmg` 并将 `Majsoul Autopilot.app` 拖入 `Applications` 目录。
+2. 启动应用，在设置页填写账号密码即可开始。
 
-## Quick Start
-
-For the desktop app, unzip `majsoul-autopilot-gui-macos-arm64.zip` and open `Majsoul Autopilot.app`.
-
-For the CLI package, unzip `majsoul-autopilot-rs-macos-arm64.zip` and enter the extracted directory:
+### 命令行版
+解压 `majsoul-autopilot-macos-arm64.zip` 后进入目录：
 
 ```bash
-cd majsoul-autopilot-rs-macos-arm64
+cd majsoul-autopilot-macos-arm64
 cp settings.example.json settings.json
 ```
 
-Edit `settings.json`:
+编辑 `settings.json`：
 
 ```json
 {
-  "model_path": "models/mortal-298k",
+  "model_path": "models/mortal",
   "autoplay_account": {
     "username": "your-email@example.com",
     "password": "your-password"
@@ -93,48 +79,39 @@ Edit `settings.json`:
 }
 ```
 
-Check the model:
+检查模型文件：
 
 ```bash
 ./majsoul-autopilot-rs --settings settings.json check-model
 ```
 
-When running from source instead of a release package, prepare the model first:
-
-```bash
-mkdir -p models
-curl -L -o models/mortal_298k.pth \
-  https://huggingface.co/VoidShine/mortal-298k/resolve/main/mortal_298k.pth
-python3 tools/export_mortal.py models/mortal_298k.pth models/mortal-298k
-```
-
-Check login and target room:
+检查登录状态与目标房间：
 
 ```bash
 ./majsoul-autopilot-rs --settings settings.json check-login
 ```
 
-Run one game:
+只运行一局：
 
 ```bash
 ./majsoul-autopilot-rs --settings settings.json run --max-games 1
 ```
 
-Run continuously:
+持续运行：
 
 ```bash
 ./majsoul-autopilot-rs --settings settings.json run
 ```
 
-Stop the runner with `Ctrl-C`.
+使用 `Ctrl-C` 停止程序。
 
-## Configuration
+## 配置
 
-`settings.json` is the only required runtime configuration file.
+`settings.json` 是唯一必需的运行时配置文件。
 
 ```json
 {
-  "model_path": "models/mortal-298k",
+  "model_path": "models/mortal",
   "autoplay_account": {
     "username": "",
     "password": ""
@@ -142,17 +119,17 @@ Stop the runner with `Ctrl-C`.
 }
 ```
 
-Fields:
+字段说明：
 
-| Field | Description |
+| 字段 | 说明 |
 | --- | --- |
-| `model_path` | Directory containing `model.safetensors` and `model_config.json` |
-| `autoplay_account.username` | Mahjong Soul email account |
-| `autoplay_account.password` | Mahjong Soul password |
+| `model_path` | Mortal 模型目录，目录内需要 `model.safetensors` 和 `model_config.json` |
+| `autoplay_account.username` | 雀魂邮箱账号 |
+| `autoplay_account.password` | 雀魂密码 |
 
-`settings.json` is ignored by git because it contains credentials.
+`settings.json` 包含账号信息，默认不会提交到 git。
 
-## Commands
+## 命令
 
 ```bash
 majsoul-autopilot-rs --settings settings.json check-model
@@ -162,76 +139,70 @@ majsoul-autopilot-rs --settings settings.json run --max-games 1
 majsoul-autopilot-rs --settings settings.json replay-fixture path/to/fixture.json
 ```
 
-## Build From Source
+## 从源码构建
 
-Install Rust, then build the CLI:
+安装 Rust 后执行：
 
 ```bash
 cargo build --release -p majsoul-autopilot-rs
 ```
 
-The binary is generated at:
+构建产物位于：
 
 ```text
 target/release/majsoul-autopilot-rs
 ```
 
-Build the desktop app:
+构建桌面 App：
 
 ```bash
 npm --prefix apps/desktop install
 npm --prefix apps/desktop run tauri -- build
 ```
 
-Create macOS release archives:
-
-```bash
-tools/package_macos_release.sh
-```
-
-For local runs from source, prepare:
+从源码本地运行时，需要准备：
 
 ```text
 settings.json
-models/mortal-298k/model.safetensors
-models/mortal-298k/model_config.json
+models/mortal/model.safetensors
+models/mortal/model_config.json
 ```
 
-Model weights and local credentials are not committed to the repository.
+模型权重和本地账号配置不会提交到仓库。
 
-## Development
+## 开发
 
-Run tests:
+运行测试：
 
 ```bash
 cargo test --workspace -- --nocapture
 ```
 
-Run clippy:
+运行 clippy：
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## Project Layout
+## 项目结构
 
 ```text
 crates/
-  autoplay/      action planning and operation guards
-  cli/           command-line entry point
-  liqi/          protobuf types and Liqi framing
-  mjai/          Liqi-to-MJAI event bridge
-  mortal/        Mortal inference and action decoding
-  protocol/      lobby/game websocket client
-  riichi-core/   riichi state and observation encoding
+  autoplay/      自动打牌动作规划和 operation 保护
+  cli/           命令行入口
+  liqi/          protobuf 类型和 Liqi framing
+  mjai/          Liqi 到 MJAI 的事件桥接
+  mortal/        Mortal 推理和动作解码
+  protocol/      lobby/game websocket 客户端
+  riichi-core/   立直麻将状态和 observation 编码
 apps/
-  desktop/       Tauri desktop app
+  desktop/       Tauri 桌面 App
 ```
 
-## Disclaimer
+## 免责声明
 
-This project is for research and experimentation. Use it at your own risk and review the rules of any service you connect to.
+本项目仅用于研究和实验。使用前请自行确认相关服务规则，并自行承担使用风险。
 
-## License
+## 许可证
 
-GPL-3.0-or-later. See [LICENSE.txt](LICENSE.txt).
+GPL-3.0-or-later。详见 [LICENSE.txt](LICENSE.txt)。
