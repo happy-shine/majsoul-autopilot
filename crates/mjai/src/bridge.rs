@@ -147,6 +147,11 @@ impl Bridge {
         self.round_end_counter
     }
 
+    /// Increments on every game action broadcast, so any server progress changes it.
+    pub fn received_key(&self) -> u64 {
+        self.received_key
+    }
+
     pub fn seat(&self) -> u32 {
         self.seat
     }

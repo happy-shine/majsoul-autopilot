@@ -1,7 +1,7 @@
 use crate::{
     action::{
-        ActionState, BotAction, Operation, OperationContext, PendingAction, RpcPlan, OP_DISCARD,
-        OP_LIQI,
+        ActionState, BotAction, Operation, OperationContext, PendingAction, RpcPlan, OP_AN_GANG,
+        OP_DISCARD, OP_HU, OP_JIA_GANG, OP_LIQI, OP_LIU_JU, OP_ZIMO,
     },
     events::{
         action_label, AccountSnapshot, ActionAck, CoreEvent, EventSink, LogLevel, ModelCandidate,
@@ -799,38 +799,35 @@ async fn execute_pending_action(
             let before_discard = game.bridge.discard_counter();
             let before_round = game.bridge.round_end_counter();
             let expected_discard = tile.as_deref().map(ms_tile_to_mjai);
-            if r#type == OP_DISCARD {
-                if let Some(op_context) = game.bridge.last_operation_context().cloned() {
-                    if op_context.source == "ActionNewRound" {
-                        if moqie {
-                            emit_log(
-                                sink,
-                                LogLevel::Info,
-                                "opening-round discard uses hand-discard mode instead of moqie",
-                            );
-                            moqie = false;
-                        }
-                        wait_opening_round_discard_window(&op_context, sink).await;
-                        let still_same_window =
-                            game.bridge.last_operation_context().is_some_and(|current| {
-                                current.source == op_context.source
-                                    && current.seat == op_context.seat
-                                    && current.received_key == op_context.received_key
-                            }) && game
-                                .bridge
-                                .last_operation_list()
-                                .iter()
-                                .any(|op| op.r#type == OP_DISCARD);
-                        if !still_same_window {
-                            emit_log(
-                                sink,
-                                LogLevel::Warn,
-                                "opening-round discard window changed before submit",
-                            );
-                            return Ok(Vec::new());
-                        }
-                    }
+            let opening_context = game
+                .bridge
+                .last_operation_context()
+                .filter(|context| context.source == "ActionNewRound")
+                .cloned();
+            if let Some(op_context) = opening_context {
+                if moqie && matches!(r#type, OP_DISCARD | OP_LIQI) {
+                    emit_log(
+                        sink,
+                        LogLevel::Info,
+                        "opening-round discard uses hand-discard mode instead of moqie",
+                    );
+                    moqie = false;
                 }
+                let request = pb::ReqSelfOperation {
+                    r#type,
+                    tile: tile.clone().unwrap_or_default(),
+                    moqie,
+                    timeuse,
+                    ..Default::default()
+                };
+                return submit_opening_round_operation(
+                    game,
+                    &op_context,
+                    request,
+                    expected_discard,
+                    sink,
+                )
+                .await;
             }
             check_common_error(
                 game.input_operation(pb::ReqSelfOperation {
@@ -847,6 +844,11 @@ async fn execute_pending_action(
                 wait_for_discard_ack(game, before_discard, before_round, expected_discard, sink)
                     .await
             } else {
+                emit_log(
+                    sink,
+                    LogLevel::Info,
+                    format!("inputOperation {} accepted", operation_label(r#type)),
+                );
                 sink(CoreEvent::ActionAck {
                     ack: ActionAck {
                         ok: true,
@@ -894,26 +896,146 @@ async fn confirm_new_round(
     Ok(Vec::new())
 }
 
-async fn wait_opening_round_discard_window(
+/// Human-like think time before the first opening-round submit, measured from ActionNewRound.
+const OPENING_ROUND_FIRST_SUBMIT_MS: ActionInterval = ActionInterval {
+    min: 2500,
+    max: 4500,
+};
+/// How long to wait for the server to react before resubmitting the same operation.
+const OPENING_ROUND_RETRY_INTERVAL: Duration = Duration::from_millis(1000);
+/// Stop resubmitting after this long; the server's own timeout takes over from there.
+const OPENING_ROUND_GIVE_UP_SECS: f64 = 20.0;
+
+/// The server silently drops self operations sent while the deal animation is still
+/// playing on ActionNewRound, and how long that lasts varies. Submit after a short
+/// human-like delay, then resubmit until the server broadcasts any progress.
+async fn submit_opening_round_operation(
+    game: &mut session::GameSession,
     op_context: &bridge::OperationContext,
+    request: pb::ReqSelfOperation,
+    expected_discard: Option<String>,
     sink: &EventSink,
-) {
-    const OPENING_ROUND_DISCARD_MIN_DELAY: f64 = 12.0;
-    if op_context.source != "ActionNewRound" {
-        return;
+) -> Result<Vec<bridge::Event>> {
+    let label = operation_label(request.r#type);
+    let since_round_start =
+        || (op_context.passed_waiting_time as f64).max(op_context.received_at.elapsed().as_secs_f64());
+    let first_submit = sample_action_delay(OPENING_ROUND_FIRST_SUBMIT_MS).as_secs_f64();
+    let wait_time = first_submit - since_round_start();
+    if wait_time > 0.0 {
+        tokio::time::sleep(Duration::from_secs_f64(wait_time)).await;
     }
-    let passed_waiting = op_context.passed_waiting_time as f64;
-    let elapsed = op_context.received_at.elapsed().as_secs_f64();
-    let wait_time = OPENING_ROUND_DISCARD_MIN_DELAY - passed_waiting.max(elapsed).max(0.0);
-    if wait_time <= 0.0 {
-        return;
+
+    let before_key = game.bridge.received_key();
+    let before_discard = game.bridge.discard_counter();
+    let before_round = game.bridge.round_end_counter();
+    let window_open = game
+        .bridge
+        .last_operation_context()
+        .is_some_and(|current| current.received_key == op_context.received_key)
+        && game
+            .bridge
+            .last_operation_list()
+            .iter()
+            .any(|op| op.r#type == request.r#type);
+    if !window_open {
+        emit_log(
+            sink,
+            LogLevel::Warn,
+            format!("opening-round {label} window changed before submit"),
+        );
+        return Ok(Vec::new());
+    }
+
+    let mut events = Vec::new();
+    let mut attempt = 0;
+    while game.bridge.received_key() == before_key {
+        if since_round_start() >= OPENING_ROUND_GIVE_UP_SECS {
+            emit_log(
+                sink,
+                LogLevel::Warn,
+                format!(
+                    "opening-round {label} not acknowledged after {attempt} submits; waiting for server"
+                ),
+            );
+            events.extend(game.next_events().await?);
+            continue;
+        }
+        attempt += 1;
+        let response = game.input_operation(request.clone()).await?;
+        let code = response.error.map(|error| error.code).unwrap_or(0);
+        emit_log(
+            sink,
+            LogLevel::Info,
+            format!(
+                "opening-round {label} submit #{attempt} at {:.1}s: code={code}",
+                since_round_start()
+            ),
+        );
+        let deadline = Instant::now() + OPENING_ROUND_RETRY_INTERVAL;
+        while game.bridge.received_key() == before_key {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, game.next_events()).await {
+                Ok(batch) => events.extend(batch?),
+                Err(_) => break,
+            }
+        }
     }
     emit_log(
         sink,
         LogLevel::Info,
-        format!("opening-round discard waits {wait_time:.1}s before submit"),
+        format!(
+            "opening-round {label} acknowledged after {attempt} submits at {:.1}s",
+            since_round_start()
+        ),
     );
-    tokio::time::sleep(Duration::from_secs_f64(wait_time)).await;
+
+    if matches!(request.r#type, OP_DISCARD | OP_LIQI)
+        && game.bridge.round_end_counter() == before_round
+    {
+        let seat = game.bridge.seat();
+        let self_discard = events.iter().find_map(|event| match event {
+            bridge::Event::Dahai { actor, pai, .. } if *actor == seat => Some(pai.clone()),
+            _ => None,
+        });
+        match (expected_discard.as_deref(), self_discard.as_deref()) {
+            (Some(expected), Some(actual)) if expected != actual => emit_log(
+                sink,
+                LogLevel::Warn,
+                format!("opening-round expected self discard {expected}, server played {actual}"),
+            ),
+            (_, Some(_)) => {}
+            (_, None) => {
+                // Progress arrived without our discard yet; fall back to the normal ACK wait.
+                events.extend(
+                    wait_for_discard_ack(game, before_discard, before_round, expected_discard, sink)
+                        .await?,
+                );
+            }
+        }
+    }
+    sink(CoreEvent::ActionAck {
+        ack: ActionAck {
+            ok: true,
+            message: format!("opening-round {label} acknowledged"),
+        },
+    });
+    Ok(events)
+}
+
+fn operation_label(op_type: u32) -> &'static str {
+    match op_type {
+        OP_DISCARD => "discard",
+        OP_LIQI => "riichi",
+        OP_AN_GANG => "ankan",
+        OP_JIA_GANG => "kakan",
+        OP_ZIMO => "tsumo",
+        OP_HU => "ron",
+        OP_LIU_JU => "kyushu-kyuhai",
+        _ => "operation",
+    }
 }
 
 async fn wait_for_discard_ack(
