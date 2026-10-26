@@ -197,6 +197,9 @@ pub async fn run_autoplay(
     validate_settings(&settings)?;
     let mut games_done = 0u32;
     let max_games = settings.autoplay.max_games;
+    // Set while rejoining a game after a dropped connection.
+    let mut reconnecting = false;
+    let mut login_failures = 0u32;
     loop {
         if max_games.is_some_and(|limit| games_done >= limit)
             || stop_after_current_game.load(Ordering::Relaxed)
@@ -236,7 +239,7 @@ pub async fn run_autoplay(
                 settings.autoplay_account.username
             ),
         );
-        let mut client = tokio::time::timeout(
+        let login = tokio::time::timeout(
             Duration::from_secs(20),
             session::ProtocolClient::login(
                 &settings.autoplay_account.username,
@@ -245,7 +248,29 @@ pub async fn run_autoplay(
             ),
         )
         .await
-        .map_err(|_| anyhow!("login timed out after 20s"))??;
+        .map_err(|_| anyhow!("login timed out after 20s"))
+        .and_then(|result| result);
+        // Only the very first login fails fast (e.g. a wrong password); later logins happen
+        // mid-session, where a network blip must not abandon a running game.
+        let retry_login = reconnecting || games_done > 0;
+        let mut client = match login {
+            Ok(client) => client,
+            Err(err) if retry_login && login_failures < LOGIN_RETRY_LIMIT => {
+                login_failures += 1;
+                let delay = login_retry_delay(login_failures);
+                emit_log(
+                    &sink,
+                    LogLevel::Warn,
+                    format!(
+                        "登录失败（第 {login_failures} 次），{}s 后重试: {err:#}",
+                        delay.as_secs()
+                    ),
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if let Some((mode, room)) = manual_target(&settings.autoplay) {
             client.set_match_target(mode, room);
         }
@@ -273,13 +298,32 @@ pub async fn run_autoplay(
         }
 
         let target_mode = client.summary.target_mode.clone();
-        let (game, initial_events) = connect_or_match_game(
+        let (game, initial_events) = match connect_or_match_game(
             &mut client,
             &sink,
             max_games,
             stop_after_current_game.clone(),
         )
-        .await?;
+        .await
+        {
+            Ok(connected) => connected,
+            Err(err) if reconnecting && login_failures < LOGIN_RETRY_LIMIT => {
+                login_failures += 1;
+                let delay = login_retry_delay(login_failures);
+                emit_log(
+                    &sink,
+                    LogLevel::Warn,
+                    format!(
+                        "重连对局失败（第 {login_failures} 次），{}s 后重试: {err:#}",
+                        delay.as_secs()
+                    ),
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        login_failures = 0;
         let completed = match run_game_loop(
             game,
             initial_events,
@@ -290,8 +334,12 @@ pub async fn run_autoplay(
         )
         .await
         {
-            Ok(completed) => completed,
+            Ok(completed) => {
+                reconnecting = false;
+                completed
+            }
             Err(err) if is_recoverable_game_connection_error(&err) => {
+                reconnecting = true;
                 sink(CoreEvent::RuntimeStatus {
                     status: RuntimeStatus::Reconnecting,
                 });
@@ -352,6 +400,18 @@ async fn refresh_account_snapshot_after_game(
         ),
     );
     Ok(())
+}
+
+/// Login/rejoin retries before giving up; with the backoff below this spans about 8 minutes.
+const LOGIN_RETRY_LIMIT: u32 = 20;
+
+fn login_retry_delay(failures: u32) -> Duration {
+    Duration::from_secs(match failures {
+        1 => 5,
+        2 => 10,
+        3 => 20,
+        _ => 30,
+    })
 }
 
 fn is_recoverable_game_connection_error(err: &anyhow::Error) -> bool {
