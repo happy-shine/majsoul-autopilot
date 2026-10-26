@@ -798,7 +798,12 @@ async fn execute_pending_action(
     settings: &Settings,
     sink: &EventSink,
 ) -> Result<Vec<bridge::Event>> {
-    tokio::time::sleep(sample_action_delay(settings.autoplay.action_interval_ms)).await;
+    let action_interval = if matches!(pending.action, BotAction::Hora { .. }) {
+        ActionInterval { min: 250, max: 450 }
+    } else {
+        settings.autoplay.action_interval_ms
+    };
+    tokio::time::sleep(sample_action_delay(action_interval)).await;
     let state = action_state(&game.bridge);
     let plan = crate::action::plan_action(&pending, &state);
     match plan {
@@ -872,9 +877,9 @@ async fn execute_pending_action(
             let opening = op_context
                 .as_ref()
                 .is_some_and(|context| context.source == "ActionNewRound");
-            // Mid-round, only discards are broadcast immediately; ron/kan acks can wait on
-            // other players' decisions, so those keep the single-submit path.
-            let resubmit = opening || matches!(r#type, OP_DISCARD | OP_LIQI);
+            // Mid-round, discards/riichi and hora (ron/tsumo) resubmit until acknowledged.
+            // Ron acks can wait on other players' decisions, so hora uses a longer give-up.
+            let resubmit = opening || matches!(r#type, OP_DISCARD | OP_LIQI | OP_HU | OP_ZIMO);
             let Some(op_context) = op_context.filter(|_| resubmit) else {
                 check_common_error(
                     game.input_operation(pb::ReqSelfOperation {
@@ -980,6 +985,8 @@ const OPENING_ROUND_RETRY_INTERVAL: Duration = Duration::from_millis(1000);
 const SELF_OPERATION_RETRY_INTERVAL: Duration = Duration::from_millis(1500);
 /// Mid-round: after this long without progress, reconnect to resync with the server.
 const SELF_OPERATION_GIVE_UP_SECS: f64 = 8.0;
+/// Mid-round hora (ron/tsumo): wait up to 15s because other players might be thinking or calling.
+const HORA_OPERATION_GIVE_UP_SECS: f64 = 15.0;
 
 /// The server sometimes answers inputOperation with code=0 but silently drops it: always
 /// during the deal animation on ActionNewRound, and occasionally mid-round (a dropped riichi
@@ -995,7 +1002,14 @@ async fn submit_self_operation(
     sink: &EventSink,
 ) -> Result<Vec<bridge::Event>> {
     let label = operation_label(request.r#type);
-    let scope = if opening { "opening-round" } else { "self-operation" };
+    let is_hora = matches!(request.r#type, OP_HU | OP_ZIMO);
+    let scope = if opening {
+        "opening-round"
+    } else if is_hora {
+        "hora"
+    } else {
+        "self-operation"
+    };
     let since_window_open =
         || (op_context.passed_waiting_time as f64).max(op_context.received_at.elapsed().as_secs_f64());
     if opening {
@@ -1007,6 +1021,8 @@ async fn submit_self_operation(
     }
     let (retry_interval, give_up_secs) = if opening {
         (OPENING_ROUND_RETRY_INTERVAL, OPENING_ROUND_GIVE_UP_SECS)
+    } else if is_hora {
+        (SELF_OPERATION_RETRY_INTERVAL, HORA_OPERATION_GIVE_UP_SECS)
     } else {
         (SELF_OPERATION_RETRY_INTERVAL, SELF_OPERATION_GIVE_UP_SECS)
     };
@@ -1057,7 +1073,7 @@ async fn submit_self_operation(
     while game.bridge.received_key() == before_key {
         let waited = first_submit_at.map_or(0.0, |at: Instant| at.elapsed().as_secs_f64());
         if (opening && since_window_open() >= give_up_secs) || (!opening && waited >= give_up_secs) {
-            if !opening {
+            if !opening && !is_hora {
                 return Err(anyhow!(
                     "{DISCARD_ACK_TIMEOUT}: {label} not acknowledged after {attempt} submits"
                 ));
@@ -1116,7 +1132,7 @@ async fn submit_self_operation(
             }
         }
     }
-    if opening || attempt > 1 {
+    if opening || attempt > 1 || is_hora {
         emit_log(
             sink,
             LogLevel::Info,
