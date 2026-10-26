@@ -159,6 +159,16 @@ pub fn select_riichi_declaration_tile(
     }
 
     let model_kind = candidate_kind(model_tile);
+    // The server lists one tile per kind and shows the red five whenever the hand holds one,
+    // even if a plain five is in hand too. The model only picks a plain five when it holds
+    // one, so keep it and save the red dora.
+    if is_plain_five(model_tile)
+        && valid_tiles
+            .iter()
+            .any(|tile| candidate_kind(tile) == model_kind)
+    {
+        return (model_tile.to_string(), "model-plain-five");
+    }
     for tile in valid_tiles {
         if candidate_kind(tile) == model_kind {
             return (tile.clone(), "model-red-equivalent");
@@ -191,7 +201,11 @@ pub fn select_chi_combination_index(consumed: &[String], operations: &[Operation
     0
 }
 
-fn candidate_kind(tile: &str) -> String {
+fn is_plain_five(tile: &str) -> bool {
+    tile.len() == 2 && tile.starts_with('5') && matches!(tile.chars().nth(1), Some('m' | 'p' | 's'))
+}
+
+pub fn candidate_kind(tile: &str) -> String {
     if tile.len() == 2
         && tile.starts_with('0')
         && matches!(tile.chars().nth(1), Some('m' | 'p' | 's'))
@@ -280,11 +294,20 @@ mod tests {
     }
 
     #[test]
-    fn riichi_uses_red_equivalent_candidate() {
+    fn riichi_keeps_plain_five_when_server_lists_red_five() {
         let valid = vec!["0m".to_string(), "3p".to_string()];
         assert_eq!(
             select_riichi_declaration_tile("5m", &valid),
-            ("0m".to_string(), "model-red-equivalent")
+            ("5m".to_string(), "model-plain-five")
+        );
+    }
+
+    #[test]
+    fn riichi_uses_red_equivalent_candidate() {
+        let valid = vec!["5m".to_string(), "3p".to_string()];
+        assert_eq!(
+            select_riichi_declaration_tile("0m", &valid),
+            ("5m".to_string(), "model-red-equivalent")
         );
     }
 
@@ -319,7 +342,7 @@ mod tests {
             plan,
             RpcPlan::InputOperation {
                 r#type: OP_LIQI,
-                tile: Some("0m".to_string()),
+                tile: Some("5m".to_string()),
                 moqie: true,
                 timeuse: 3
             }

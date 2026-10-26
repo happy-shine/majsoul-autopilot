@@ -1,6 +1,7 @@
 use crate::{
     action::{
-        ActionState, BotAction, Operation, OperationContext, PendingAction, RpcPlan, OP_AN_GANG,
+        candidate_kind, ActionState, BotAction, Operation, OperationContext, PendingAction,
+        RpcPlan, OP_AN_GANG,
         OP_DISCARD, OP_HU, OP_JIA_GANG, OP_LIQI, OP_LIU_JU, OP_ZIMO,
     },
     events::{
@@ -1031,6 +1032,25 @@ async fn submit_self_operation(
         return Ok(Vec::new());
     }
 
+    let mut request = request;
+    let riichi_candidates = (request.r#type == OP_LIQI).then(|| {
+        game.bridge
+            .last_operation_list()
+            .iter()
+            .find(|op| op.r#type == OP_LIQI)
+            .map(|op| op.combination.clone())
+            .unwrap_or_default()
+    });
+    if let Some(valid) = &riichi_candidates {
+        if valid.len() > 1 || !valid.contains(&request.tile) {
+            emit_log(
+                sink,
+                LogLevel::Info,
+                format!("riichi candidates: valid={valid:?} using={}", request.tile),
+            );
+        }
+    }
+
     let mut events = Vec::new();
     let mut attempt = 0;
     let mut first_submit_at = None;
@@ -1052,6 +1072,26 @@ async fn submit_self_operation(
         }
         attempt += 1;
         first_submit_at.get_or_insert_with(Instant::now);
+        // A plain five sent while the server only listed the red one: if the first submit was
+        // ignored, fall back to the listed tile rather than resubmitting a rejected one.
+        if attempt == 2 {
+            if let Some(listed) = riichi_candidates.as_ref().and_then(|valid| {
+                (!valid.contains(&request.tile))
+                    .then(|| {
+                        valid
+                            .iter()
+                            .find(|tile| candidate_kind(tile) == candidate_kind(&request.tile))
+                    })
+                    .flatten()
+            }) {
+                emit_log(
+                    sink,
+                    LogLevel::Warn,
+                    format!("riichi tile {} ignored; resubmitting listed {listed}", request.tile),
+                );
+                request.tile = listed.clone();
+            }
+        }
         let response = game.input_operation(request.clone()).await?;
         let code = response.error.map(|error| error.code).unwrap_or(0);
         if opening || attempt > 1 || code != 0 {
