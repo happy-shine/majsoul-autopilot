@@ -362,8 +362,12 @@ fn is_recoverable_game_connection_error(err: &anyhow::Error) -> bool {
             || message.contains("websocket ended before next frame")
             || message.contains("Connection reset by peer")
             || message.contains("Broken pipe")
+            || message.contains(DISCARD_ACK_TIMEOUT)
     })
 }
+
+/// A silent server stall after a discard; reconnecting resyncs the table from the server.
+const DISCARD_ACK_TIMEOUT: &str = "discard broadcast ACK timed out";
 
 fn recoverable_game_connection_summary(err: &anyhow::Error) -> &'static str {
     if err.chain().any(|cause| {
@@ -378,6 +382,12 @@ fn recoverable_game_connection_summary(err: &anyhow::Error) -> &'static str {
         .any(|cause| cause.to_string().contains("websocket closed:"))
     {
         return "服务器关闭了对局连接";
+    }
+    if err
+        .chain()
+        .any(|cause| cause.to_string().contains(DISCARD_ACK_TIMEOUT))
+    {
+        return "出牌后服务器 10 秒没有回应";
     }
     "网络连接中断"
 }
@@ -1048,12 +1058,13 @@ async fn wait_for_discard_ack(
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
+        let timed_out = || anyhow!("{DISCARD_ACK_TIMEOUT}: discard RPC accepted but no broadcast arrived");
         if remaining.is_zero() {
-            return Err(anyhow!(
-                "discard RPC accepted but no matching broadcast ACK arrived"
-            ));
+            return Err(timed_out());
         }
-        let events = tokio::time::timeout(remaining, game.next_events()).await??;
+        let events = tokio::time::timeout(remaining, game.next_events())
+            .await
+            .map_err(|_| timed_out())??;
         if game.bridge.round_end_counter() > before_round {
             sink(CoreEvent::ActionAck {
                 ack: ActionAck {
