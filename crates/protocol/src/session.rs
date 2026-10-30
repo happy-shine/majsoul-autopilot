@@ -26,9 +26,17 @@ pub struct LoginSummary {
     pub level_id: u32,
     pub level_score: u32,
     pub rank_tier: u32,
+    pub gold: u32,
     pub target_mode: Mode,
     pub target_room: Room,
     pub access_token: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoinClaimReport {
+    pub gold_before: u32,
+    pub gold_after: u32,
+    pub claimed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +57,15 @@ pub struct ExistingGame {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartMatchResult {
-    Queued(String),
+    Queued {
+        match_sid: String,
+        coin_claim: Option<CoinClaimReport>,
+    },
     Busy,
+    InsufficientCoins {
+        gold: u32,
+        coin_claim: CoinClaimReport,
+    },
 }
 
 pub struct GameSession {
@@ -166,9 +181,237 @@ impl ProtocolClient {
         self.summary.level_id = level.id;
         self.summary.level_score = level.score;
         self.summary.rank_tier = rank_tier_from_level_id(level.id);
+        if account.gold > 0 {
+            self.summary.gold = account.gold;
+        }
         self.summary.target_mode = target_mode;
         self.summary.target_room = target_room;
         Ok(self.summary.clone())
+    }
+
+    pub async fn claim_available_coins(&mut self) -> CoinClaimReport {
+        const CLAIM_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+        let gold_before = self.summary.gold;
+        let mut claimed = Vec::new();
+
+        // 1. Daily revive coin (e.g. 18,000 copper coins for Master tier) — claim FIRST while
+        //    gold is below threshold so daily perishable quota is used before one-time rewards.
+        if let Ok(Ok(info)) = tokio::time::timeout(
+            CLAIM_RPC_TIMEOUT,
+            self.socket
+                .request::<_, pb::ResReviveCoinInfo>(".lq.Lobby.fetchReviveCoinInfo", &pb::ReqCommon {}),
+        )
+        .await
+        {
+            if info.error.as_ref().map_or(0, |e| e.code) == 0 && !info.has_gained {
+                if let Ok(Ok(res)) = tokio::time::timeout(
+                    CLAIM_RPC_TIMEOUT,
+                    self.socket
+                        .request::<_, pb::ResCommon>(".lq.Lobby.gainReviveCoin", &pb::ReqCommon {}),
+                )
+                .await
+                {
+                    if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                        claimed.push("revive_coin".to_string());
+                    }
+                }
+            }
+        }
+
+        // 2. Mail attachments (maintenance compensation, rank/event rewards).
+        if let Ok(Ok(mail_info)) = tokio::time::timeout(
+            CLAIM_RPC_TIMEOUT,
+            self.socket
+                .request::<_, pb::ResMailInfo>(".lq.Lobby.fetchMailInfo", &pb::ReqCommon {}),
+        )
+        .await
+        {
+            if mail_info.error.as_ref().map_or(0, |e| e.code) == 0 {
+                let mut mail_claimed = 0u32;
+                for mail in mail_info.mails {
+                    if !mail.attachments.is_empty() && !mail.take_attachment {
+                        if let Ok(Ok(res)) = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResCommon>(
+                                ".lq.Lobby.takeAttachmentFromMail",
+                                &pb::ReqTakeAttachment {
+                                    mail_id: mail.mail_id,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                mail_claimed += 1;
+                            }
+                        }
+                    }
+                }
+                if mail_claimed > 0 {
+                    claimed.push(format!("mail({mail_claimed})"));
+                }
+            }
+        }
+
+        // 3. Activity sign-in & completed activity/period/random tasks.
+        if let Ok(Ok(act)) = tokio::time::timeout(
+            CLAIM_RPC_TIMEOUT,
+            self.socket.request::<_, pb::ResAccountActivityData>(
+                ".lq.Lobby.fetchAccountActivityData",
+                &pb::ReqCommon {},
+            ),
+        )
+        .await
+        {
+            if act.error.as_ref().map_or(0, |e| e.code) == 0 {
+                let mut act_signin = 0u32;
+                for sign in act.sign_in_data {
+                    if sign.activity_id != 0 {
+                        if let Ok(Ok(res)) = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResDoActivitySignIn>(
+                                ".lq.Lobby.doActivitySignIn",
+                                &pb::ReqDoActivitySignIn {
+                                    activity_id: sign.activity_id,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            if res.error.as_ref().map_or(0, |e| e.code) == 0
+                                && !res.rewards.is_empty()
+                            {
+                                act_signin += 1;
+                            }
+                        }
+                    }
+                }
+                if act_signin > 0 {
+                    claimed.push(format!("activity_sign_in({act_signin})"));
+                }
+
+                let task_ids: Vec<u32> = act
+                    .task_progress_list
+                    .into_iter()
+                    .filter(|p| p.achieved && !p.rewarded)
+                    .map(|p| p.id)
+                    .collect();
+                if !task_ids.is_empty() {
+                    if let Ok(Ok(res)) = tokio::time::timeout(
+                        CLAIM_RPC_TIMEOUT,
+                        self.socket.request::<_, pb::ResCommon>(
+                            ".lq.Lobby.completeActivityTaskBatch",
+                            &pb::ReqCompleteActivityTaskBatch {
+                                task_list: task_ids.clone(),
+                            },
+                        ),
+                    )
+                    .await
+                    {
+                        if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                            claimed.push(format!("activity_tasks({})", task_ids.len()));
+                        }
+                    }
+                }
+
+                let period_ids: Vec<u32> = act
+                    .period_task_progress_list
+                    .into_iter()
+                    .filter(|p| p.achieved && !p.rewarded)
+                    .map(|p| p.id)
+                    .collect();
+                if !period_ids.is_empty() {
+                    if let Ok(Ok(res)) = tokio::time::timeout(
+                        CLAIM_RPC_TIMEOUT,
+                        self.socket.request::<_, pb::ResCommon>(
+                            ".lq.Lobby.completePeriodActivityTaskBatch",
+                            &pb::ReqCompletePeriodActivityTaskBatch {
+                                task_list: period_ids.clone(),
+                            },
+                        ),
+                    )
+                    .await
+                    {
+                        if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                            claimed.push(format!("period_tasks({})", period_ids.len()));
+                        }
+                    }
+                }
+
+                let random_ids: Vec<u32> = act
+                    .random_task_progress_list
+                    .into_iter()
+                    .filter(|p| p.achieved && !p.rewarded)
+                    .map(|p| p.id)
+                    .collect();
+                if !random_ids.is_empty() {
+                    if let Ok(Ok(res)) = tokio::time::timeout(
+                        CLAIM_RPC_TIMEOUT,
+                        self.socket.request::<_, pb::ResCommon>(
+                            ".lq.Lobby.completeRandomActivityTaskBatch",
+                            &pb::ReqCompleteActivityTaskBatch {
+                                task_list: random_ids.clone(),
+                            },
+                        ),
+                    )
+                    .await
+                    {
+                        if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                            claimed.push(format!("random_tasks({})", random_ids.len()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Unclaimed completed achievements (often grant copper coins on new accounts).
+        if let Ok(Ok(ach)) = tokio::time::timeout(
+            CLAIM_RPC_TIMEOUT,
+            self.socket
+                .request::<_, pb::ResAchievement>(".lq.Lobby.fetchAchievement", &pb::ReqCommon {}),
+        )
+        .await
+        {
+            if ach.error.as_ref().map_or(0, |e| e.code) == 0 {
+                let mut ach_claimed = 0u32;
+                for progress in ach
+                    .progresses
+                    .into_iter()
+                    .filter(|p| p.achieved && !p.rewarded)
+                    .take(40)
+                {
+                    if let Ok(Ok(res)) = tokio::time::timeout(
+                        CLAIM_RPC_TIMEOUT,
+                        self.socket.request::<_, pb::ResReceiveAchievementReward>(
+                            ".lq.Lobby.receiveAchievementReward",
+                            &pb::ReqReceiveAchievementReward {
+                                achievement_id: progress.id,
+                            },
+                        ),
+                    )
+                    .await
+                    {
+                        if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                            ach_claimed += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if ach_claimed > 0 {
+                    claimed.push(format!("achievements({ach_claimed})"));
+                }
+            }
+        }
+
+        CoinClaimReport {
+            gold_before,
+            gold_after: self.summary.gold,
+            claimed,
+        }
     }
 
     pub async fn fetch_game_record_list(
@@ -211,20 +454,45 @@ impl ProtocolClient {
         self.prepare_game_route().await?;
         let sid = match_sid(&self.summary.target_mode, &self.summary.target_room)
             .ok_or_else(|| anyhow!("no match sid for current target"))?;
-        let response: pb::ResCommon = self
+        let mut coin_claim = None;
+
+        let payload = start_match_payload(sid.clone());
+        let mut response: pb::ResCommon = self
             .socket
-            .request(
-                ".lq.Lobby.startUnifiedMatch",
-                &start_match_payload(sid.clone()),
-            )
+            .request(".lq.Lobby.startUnifiedMatch", &payload)
             .await?;
+
+        if response.error.as_ref().map_or(0, |e| e.code) == 1304 {
+            let report = self.claim_available_coins().await;
+            let gained = !report.claimed.is_empty();
+            coin_claim = Some(report);
+            if gained {
+                response = self
+                    .socket
+                    .request(".lq.Lobby.startUnifiedMatch", &payload)
+                    .await?;
+            }
+        }
+
+        if response.error.as_ref().map_or(0, |e| e.code) == 1304 {
+            // Could be a stale match queue on the server; cancel and retry once.
+            let _ = self.cancel_match().await;
+            response = self
+                .socket
+                .request(".lq.Lobby.startUnifiedMatch", &payload)
+                .await?;
+        }
+
         if let Some(error) = response.error {
             if error.code != 0 {
                 if error.code == 1023 {
                     return Ok(StartMatchResult::Busy);
                 }
                 if error.code == 1304 {
-                    return Ok(StartMatchResult::Queued(sid));
+                    return Ok(StartMatchResult::InsufficientCoins {
+                        gold: self.summary.gold,
+                        coin_claim: coin_claim.unwrap_or_default(),
+                    });
                 }
                 return Err(anyhow!(
                     "startUnifiedMatch failed: code={} str={:?} u32={:?}",
@@ -234,7 +502,10 @@ impl ProtocolClient {
                 ));
             }
         }
-        Ok(StartMatchResult::Queued(sid))
+        Ok(StartMatchResult::Queued {
+            match_sid: sid,
+            coin_claim,
+        })
     }
 
     pub async fn wait_for_match_start(&mut self) -> Result<MatchStart> {
@@ -607,10 +878,21 @@ fn login_summary(response: pb::ResLogin) -> Result<LoginSummary> {
         level_id: level.id,
         level_score: level.score,
         rank_tier: rank_tier_from_level_id(level.id),
+        gold: account.gold,
         target_mode,
         target_room,
         access_token: response.access_token,
     })
+}
+
+pub fn min_gold_for_room(room: &Room) -> u32 {
+    match room {
+        Room::Bronze => 0,
+        Room::Silver => 1_500,
+        Room::Gold => 6_000,
+        Room::Jade => 15_000,
+        Room::Throne => 30_000,
+    }
 }
 
 pub fn start_match_payload(match_sid: String) -> pb::ReqStartUnifiedMatch {
@@ -631,6 +913,15 @@ fn current_time_millis() -> u64 {
 mod tests {
     use super::*;
     use liqi::codec::{encode_blocks, ProtoBlock};
+
+    #[test]
+    fn min_gold_thresholds_match_majsoul_rooms() {
+        assert_eq!(min_gold_for_room(&Room::Bronze), 0);
+        assert_eq!(min_gold_for_room(&Room::Silver), 1_500);
+        assert_eq!(min_gold_for_room(&Room::Gold), 6_000);
+        assert_eq!(min_gold_for_room(&Room::Jade), 15_000);
+        assert_eq!(min_gold_for_room(&Room::Throne), 30_000);
+    }
 
     #[test]
     fn start_match_payload_uses_current_webgl_client_version() {

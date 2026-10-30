@@ -286,14 +286,28 @@ pub async fn run_autoplay(
             &sink,
             LogLevel::Info,
             format!(
-                "login ok: {} account_id={} level_id={} target={}/{}",
+                "login ok: {} account_id={} level_id={} gold={} target={}/{}",
                 client.summary.nickname,
                 client.summary.account_id,
                 client.summary.level_id,
+                client.summary.gold,
                 mode_key(&client.summary.target_mode),
                 room_key(&client.summary.target_room)
             ),
         );
+        if !reconnecting {
+            let report = client.claim_available_coins().await;
+            if !report.claimed.is_empty() || report.gold_after != report.gold_before {
+                emit_log(
+                    &sink,
+                    LogLevel::Info,
+                    format!(
+                        "auto-claimed coins on login: {:?} (gold {} -> {})",
+                        report.claimed, report.gold_before, report.gold_after
+                    ),
+                );
+            }
+        }
         if let Ok(records) = client.fetch_game_records(10).await {
             sink(CoreEvent::GameRecords { records });
         }
@@ -392,10 +406,11 @@ async fn refresh_account_snapshot_after_game(
         sink,
         LogLevel::Info,
         format!(
-            "account refreshed after game: {} level_id={} score={} target={}/{}",
+            "account refreshed after game: {} level_id={} score={} gold={} target={}/{}",
             client.summary.nickname,
             client.summary.level_id,
             client.summary.level_score,
+            client.summary.gold,
             mode_key(&client.summary.target_mode),
             room_key(&client.summary.target_room)
         ),
@@ -478,51 +493,115 @@ async fn connect_or_match_game(
         return client.connect_existing_game(&existing).await;
     }
 
-    if stop_after_current_game.load(Ordering::Relaxed) {
-        return Err(anyhow!("stop requested before entering match"));
-    }
-    sink(CoreEvent::RuntimeStatus {
-        status: RuntimeStatus::Matching,
-    });
-    match client.start_match().await? {
-        StartMatchResult::Queued(match_sid) => {
-            emit_log(
-                sink,
-                LogLevel::Info,
-                format!(
-                    "match queued: account_id={} target={mode:?}/{room:?} match_sid={match_sid} max_games={max_games:?}",
-                    client.summary.account_id
-                ),
-            );
-            let start = client.wait_for_match_start().await?;
-            emit_log(
-                sink,
-                LogLevel::Info,
-                format!(
-                    "match found: mode_id={} game_uuid={} location={} url={}",
-                    start.match_mode_id, start.game_uuid, start.location, start.game_url
-                ),
-            );
-            client.connect_game(&start).await
+    loop {
+        if stop_after_current_game.load(Ordering::Relaxed) {
+            return Err(anyhow!("stop requested before entering match"));
         }
-        StartMatchResult::Busy => {
-            if let Some(existing) = client.fetch_existing_game().await? {
-                sink(CoreEvent::RuntimeStatus {
-                    status: RuntimeStatus::Reconnecting,
-                });
+        sink(CoreEvent::RuntimeStatus {
+            status: RuntimeStatus::Matching,
+        });
+        match client.start_match().await? {
+            StartMatchResult::Queued {
+                match_sid,
+                coin_claim,
+            } => {
+                if let Some(report) = coin_claim {
+                    if !report.claimed.is_empty() || report.gold_after != report.gold_before {
+                        emit_log(
+                            sink,
+                            LogLevel::Info,
+                            format!(
+                                "auto-claimed coins before match: {:?} (gold {} -> {})",
+                                report.claimed, report.gold_before, report.gold_after
+                            ),
+                        );
+                    }
+                }
                 emit_log(
                     sink,
                     LogLevel::Info,
                     format!(
-                        "account busy; reconnecting existing game: account_id={} game_uuid={} location={}",
-                        client.summary.account_id, existing.game_uuid, existing.location
+                        "match queued: account_id={} target={mode:?}/{room:?} match_sid={match_sid} gold={} max_games={max_games:?}",
+                        client.summary.account_id, client.summary.gold
                     ),
                 );
-                client.connect_existing_game(&existing).await
-            } else {
-                Err(anyhow!(
-                    "account busy but fetchGamingInfo returned no active game"
-                ))
+                match tokio::time::timeout(
+                    Duration::from_secs(300),
+                    client.wait_for_match_start(),
+                )
+                .await
+                {
+                    Ok(Ok(start)) => {
+                        emit_log(
+                            sink,
+                            LogLevel::Info,
+                            format!(
+                                "match found: mode_id={} game_uuid={} location={} url={}",
+                                start.match_mode_id, start.game_uuid, start.location, start.game_url
+                            ),
+                        );
+                        return client.connect_game(&start).await;
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => {
+                        emit_log(
+                            sink,
+                            LogLevel::Warn,
+                            format!(
+                                "match queue waited 300s without game start; cancelling {match_sid} and retrying"
+                            ),
+                        );
+                        let _ = client.cancel_match().await;
+                        continue;
+                    }
+                }
+            }
+            StartMatchResult::InsufficientCoins { gold, coin_claim } => {
+                if !coin_claim.claimed.is_empty() || coin_claim.gold_after != coin_claim.gold_before
+                {
+                    emit_log(
+                        sink,
+                        LogLevel::Info,
+                        format!(
+                            "auto-claimed coins: {:?} (gold {} -> {})",
+                            coin_claim.claimed, coin_claim.gold_before, coin_claim.gold_after
+                        ),
+                    );
+                }
+                emit_log(
+                    sink,
+                    LogLevel::Warn,
+                    format!(
+                        "insufficient copper coins for {mode:?}/{room:?} (gold={gold}, need>={}); retrying coin claim in 300s",
+                        session::min_gold_for_room(&room)
+                    ),
+                );
+                for _ in 0..300 {
+                    if stop_after_current_game.load(Ordering::Relaxed) {
+                        return Err(anyhow!("stop requested while waiting for copper coins"));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+            StartMatchResult::Busy => {
+                if let Some(existing) = client.fetch_existing_game().await? {
+                    sink(CoreEvent::RuntimeStatus {
+                        status: RuntimeStatus::Reconnecting,
+                    });
+                    emit_log(
+                        sink,
+                        LogLevel::Info,
+                        format!(
+                            "account busy; reconnecting existing game: account_id={} game_uuid={} location={}",
+                            client.summary.account_id, existing.game_uuid, existing.location
+                        ),
+                    );
+                    return client.connect_existing_game(&existing).await;
+                } else {
+                    return Err(anyhow!(
+                        "account busy but fetchGamingInfo returned no active game"
+                    ));
+                }
             }
         }
     }
