@@ -2,7 +2,10 @@ use anyhow::{anyhow, Context, Result};
 use autoplay::{
     events::{CoreEvent, EventSink, LogLevel},
     runtime::{resolve_model_path, run_autoplay, RuntimeOptions},
-    settings::{read_settings_unchecked, validate_settings, Account, AutoplaySettings, Settings},
+    settings::{
+        default_device_store_path, read_settings_unchecked, resolve_account_device_id,
+        resolve_account_device_id_in_store, validate_settings, Account, AutoplaySettings, Settings,
+    },
 };
 use clap::{Parser, Subcommand};
 use mortal::{
@@ -109,20 +112,26 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::CheckLogin => {
+            let device_id = resolve_account_device_id(
+                &settings.autoplay_account.username,
+                settings.autoplay_account.device_id.as_deref(),
+                Some(&cli.settings),
+            )?;
             let summary = session::check_login(
                 &settings.autoplay_account.username,
                 &settings.autoplay_account.password,
-                "rust-cli-device",
+                &device_id,
             )
             .await?;
             println!(
-                "login ok: account_id={} nickname={} level={} tier={} target={:?}/{:?}",
+                "login ok: account_id={} nickname={} level={} tier={} target={:?}/{:?} device_id={}",
                 summary.account_id,
                 summary.nickname,
                 summary.level_id,
                 summary.rank_tier,
                 summary.target_mode,
-                summary.target_room
+                summary.target_room,
+                device_id
             );
         }
         Command::CheckModel => {
@@ -138,11 +147,16 @@ async fn main() -> Result<()> {
             if max_games.is_some() {
                 settings.autoplay.max_games = max_games;
             }
+            let device_id = resolve_account_device_id(
+                &settings.autoplay_account.username,
+                settings.autoplay_account.device_id.as_deref(),
+                Some(&cli.settings),
+            )?;
             run_autoplay(
                 RuntimeOptions {
                     settings,
                     settings_path: Some(cli.settings),
-                    device_id: "rust-cli-device".to_string(),
+                    device_id,
                 },
                 prefixed_stdout_sink("main".to_string()),
                 Arc::new(AtomicBool::new(false)),
@@ -154,7 +168,8 @@ async fn main() -> Result<()> {
             max_games,
             concurrency,
         } => {
-            let runs = load_multi_account_runs(&settings, &accounts, max_games)
+            let store_path = default_device_store_path(Some(&cli.settings));
+            let runs = load_multi_account_runs(&settings, &accounts, max_games, &store_path)
                 .with_context(|| format!("load accounts from {}", accounts.display()))?;
             run_many(runs, cli.settings, concurrency).await?;
         }
@@ -202,6 +217,7 @@ fn load_multi_account_runs(
     base: &Settings,
     accounts_path: &Path,
     max_games: Option<u32>,
+    store_path: &Path,
 ) -> Result<Vec<AccountRun>> {
     let raw = fs::read_to_string(accounts_path)
         .with_context(|| format!("read accounts from {}", accounts_path.display()))?;
@@ -229,16 +245,19 @@ fn load_multi_account_runs(
         if max_games.is_some() {
             settings.autoplay.max_games = max_games;
         }
+        let device_id = resolve_account_device_id_in_store(
+            &account.username,
+            account.device_id.as_deref(),
+            store_path,
+        )?;
         settings.autoplay_account = Account {
             username: account.username,
             password: account.password,
+            device_id: Some(device_id.clone()),
         };
         let label = account
             .label
             .unwrap_or_else(|| format!("{}:{}", index + 1, settings.autoplay_account.username));
-        let device_id = account
-            .device_id
-            .unwrap_or_else(|| format!("rust-cli-{}-{}", index + 1, sanitize_device_id(&label)));
         runs.push(AccountRun {
             label,
             device_id,
@@ -323,22 +342,6 @@ fn prefixed_stdout_sink(label: String) -> EventSink {
     })
 }
 
-fn sanitize_device_id(raw: &str) -> String {
-    raw.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .chars()
-        .take(48)
-        .collect::<String>()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +403,7 @@ mod tests {
     #[test]
     fn multi_account_file_merges_shared_defaults_and_overrides() {
         let path = temp_file("accounts");
+        let store = temp_file("device-store");
         fs::write(
             &path,
             r#"{
@@ -431,7 +435,8 @@ mod tests {
         .unwrap();
         let base = Settings::default();
 
-        let runs = load_multi_account_runs(&base, &path, Some(1)).unwrap();
+        let runs = load_multi_account_runs(&base, &path, Some(1), &store).unwrap();
+        let runs_again = load_multi_account_runs(&base, &path, Some(1), &store).unwrap();
 
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].label, "alpha");
@@ -439,29 +444,27 @@ mod tests {
         assert_eq!(runs[0].settings.autoplay.max_games, Some(1));
         assert_eq!(runs[1].settings.model_path, "models/b");
         assert_eq!(runs[1].settings.autoplay.max_games, Some(1));
-        assert!(runs[1].device_id.starts_with("rust-cli-2-"));
+        assert!(autoplay::settings::is_valid_browser_uuid_v4(&runs[0].device_id));
+        assert!(autoplay::settings::is_valid_browser_uuid_v4(&runs[1].device_id));
+        assert_ne!(runs[0].device_id, runs[1].device_id);
+        assert_eq!(runs[0].device_id, runs_again[0].device_id);
+        assert_eq!(runs[1].device_id, runs_again[1].device_id);
         let _ = fs::remove_file(path);
+        let _ = fs::remove_file(store);
     }
 
     #[test]
     fn multi_account_file_requires_accounts() {
         let path = temp_file("empty-accounts");
+        let store = temp_file("empty-store");
         fs::write(&path, r#"{"accounts":[]}"#).unwrap();
 
-        let error = load_multi_account_runs(&Settings::default(), &path, None)
+        let error = load_multi_account_runs(&Settings::default(), &path, None, &store)
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("at least one account"));
         let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn device_id_sanitizer_keeps_ids_short_and_ascii() {
-        assert_eq!(
-            sanitize_device_id("账号 alpha@example.com"),
-            "alpha-example-com"
-        );
-        assert!(sanitize_device_id(&"x".repeat(80)).len() <= 48);
+        let _ = fs::remove_file(store);
     }
 }

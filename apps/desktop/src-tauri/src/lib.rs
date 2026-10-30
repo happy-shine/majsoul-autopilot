@@ -97,12 +97,18 @@ fn list_models(state: State<'_, GuiState>) -> Result<Vec<ModelChoice>, String> {
 #[tauri::command]
 async fn start_autoplay(state: State<'_, GuiState>, settings: Settings) -> Result<(), String> {
     validate_settings(&settings).map_err(|err| err.to_string())?;
+    let device_id = autoplay::settings::resolve_account_device_id(
+        &settings.autoplay_account.username,
+        settings.autoplay_account.device_id.as_deref(),
+        Some(&state.settings_path),
+    )
+    .map_err(|err| err.to_string())?;
     state
         .controller
         .start(RuntimeOptions {
             settings,
             settings_path: Some(state.settings_path.clone()),
-            device_id: "rust-gui-device".to_string(),
+            device_id,
         })
         .await
         .map_err(|err| err.to_string())
@@ -147,10 +153,16 @@ async fn fetch_game_records(
     {
         return Err("未配置账号或密码".to_string());
     }
+    let device_id = autoplay::settings::resolve_account_device_id(
+        &settings.autoplay_account.username,
+        settings.autoplay_account.device_id.as_deref(),
+        Some(&state.settings_path),
+    )
+    .map_err(|err| err.to_string())?;
     let mut client = protocol::session::ProtocolClient::login(
         &settings.autoplay_account.username,
         &settings.autoplay_account.password,
-        "rust-gui-device",
+        &device_id,
     )
     .await
     .map_err(|err| err.to_string())?;

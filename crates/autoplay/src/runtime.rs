@@ -8,7 +8,10 @@ use crate::{
         action_label, AccountSnapshot, ActionAck, CoreEvent, EventSink, LogLevel, ModelCandidate,
         ModelDecision, PlannedAction, RuntimeStatus,
     },
-    settings::{manual_target, validate_settings, ActionInterval, Settings},
+    settings::{
+        is_placeholder_device_id, manual_target, resolve_account_device_id, validate_settings,
+        ActionInterval, Settings,
+    },
     table::{TableSnapshot, TableTracker},
 };
 use anyhow::{anyhow, Context, Result};
@@ -196,6 +199,23 @@ pub async fn run_autoplay(
     }
     settings.model_path = resolved_model_path.display().to_string();
     validate_settings(&settings)?;
+    let device_id = if is_placeholder_device_id(&device_id) {
+        resolve_account_device_id(
+            &settings.autoplay_account.username,
+            settings.autoplay_account.device_id.as_deref(),
+            settings_path.as_deref(),
+        )?
+    } else {
+        device_id
+    };
+    emit_log(
+        &sink,
+        LogLevel::Info,
+        format!(
+            "device fingerprint ready: username={} random_key={device_id}",
+            settings.autoplay_account.username
+        ),
+    );
     let mut games_done = 0u32;
     let max_games = settings.autoplay.max_games;
     // Set while rejoining a game after a dropped connection.
@@ -256,7 +276,11 @@ pub async fn run_autoplay(
         let retry_login = reconnecting || games_done > 0;
         let mut client = match login {
             Ok(client) => client,
-            Err(err) if retry_login && login_failures < LOGIN_RETRY_LIMIT => {
+            Err(err)
+                if retry_login
+                    && login_failures < LOGIN_RETRY_LIMIT
+                    && !is_account_ban_error(&format!("{err:#}")) =>
+            {
                 login_failures += 1;
                 let delay = login_retry_delay(login_failures);
                 emit_log(
@@ -428,6 +452,14 @@ fn login_retry_delay(failures: u32) -> Duration {
         3 => 20,
         _ => 30,
     })
+}
+
+fn is_account_ban_error(message: &str) -> bool {
+    message.contains("code=503")
+        && (message.contains("違反用戶協定")
+            || message.contains("违反用户协定")
+            || message.contains("第三方工具")
+            || message.contains("5.6."))
 }
 
 fn is_recoverable_game_connection_error(err: &anyhow::Error) -> bool {
