@@ -641,7 +641,7 @@ fn query_jev_decision(state: &PlayerState, mask: &[bool]) -> EngineDecision {
 
     let options: Vec<String> = legal.iter().map(|(_, s)| s.clone()).collect();
     let payload = serde_json::json!({
-        "context": state.jev_context_info(),
+        "context": state.jev_context_info(mask),
         "options": options,
     });
 
