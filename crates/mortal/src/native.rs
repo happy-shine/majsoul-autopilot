@@ -80,10 +80,18 @@ impl<E: NativeEngine> NativeBot<E> {
         let action_idx = observations.len();
         observations.push(observation);
 
-        let jev_dec = query_jev_decision(&self.state, &observations[action_idx].mask);
-        let decision = &jev_dec;
-        let kan_jev_dec = kan_select_idx.map(|idx| query_jev_decision(&self.state, &observations[idx].mask));
-        let kan_decision = kan_jev_dec.as_ref();
+        #[cfg(not(test))]
+        let (jev_dec, kan_jev_dec) = (
+            query_jev_decision(&self.state, &observations[action_idx].mask),
+            kan_select_idx.map(|idx| query_jev_decision(&self.state, &observations[idx].mask)),
+        );
+        #[cfg(not(test))]
+        let (decision, kan_decision) = (&jev_dec, kan_jev_dec.as_ref());
+
+        #[cfg(test)]
+        let decisions = self.engine.react_batch(&observations)?;
+        #[cfg(test)]
+        let (decision, kan_decision) = (&decisions[action_idx], kan_select_idx.map(|idx| &decisions[idx]));
         let action = if self.enable_rule_based_agari_guard
             && decision.action == 43
             && !self.state.rule_based_agari()
@@ -597,7 +605,9 @@ mod tests {
 
 fn action_idx_to_label(idx: usize) -> String {
     match idx {
-        0..=36 => Tile::try_from(idx).map(|t| t.to_string()).unwrap_or_else(|_| format!("t{idx}")),
+        0..=36 => Tile::try_from(idx)
+            .map(|t| t.to_string())
+            .unwrap_or_else(|_| format!("t{idx}")),
         37 => "reach".to_string(),
         38 => "chi_low".to_string(),
         39 => "chi_mid".to_string(),
@@ -608,6 +618,69 @@ fn action_idx_to_label(idx: usize) -> String {
         44 => "ryukyoku".to_string(),
         _ => "none".to_string(),
     }
+}
+
+fn describe_action_option(opt: &str) -> String {
+    match opt {
+        "hora" => "立即和牌（自摸或荣和得分）".to_string(),
+        "reach" => "宣言立直（门前清听牌加1番并争夺里宝牌）".to_string(),
+        "pon" => "碰牌（副露鸣牌）".to_string(),
+        "chi_low" => "低位顺子吃牌（如用56吃4）".to_string(),
+        "chi_mid" => "嵌张顺子吃牌（如用46吃5）".to_string(),
+        "chi_high" => "高位顺子吃牌（如用34吃5）".to_string(),
+        "kan" => "杠牌（暗杠/加杠/大明杠）".to_string(),
+        "ryukyoku" => "九种九牌流局".to_string(),
+        "none" => "跳过不鸣牌/不动作（保持门前清或保持当前听牌）".to_string(),
+        other => format!("切出牌 {other}"),
+    }
+}
+
+fn load_openrouter_api_key() -> String {
+    if let Ok(val) = std::env::var("OPENROUTER_API_KEY") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let mut candidates = Vec::new();
+    if let Ok(custom) = std::env::var("JEV_ENV_FILE") {
+        candidates.push(custom);
+    }
+    candidates.push(".env".to_string());
+    candidates.push("/Users/shine/proj/dc2dc/secrets/.env".to_string());
+
+    for path in candidates {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("OPENROUTER_API_KEY=") {
+                    let val = rest.trim().trim_matches('"').trim_matches('\'');
+                    if !val.is_empty() {
+                        return val.to_string();
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+const JEV_INSTRUCTIONS: &str = "你是日本立直麻将（雀魂玉之间·四人南/东）顶级AI决策引擎。请严格依据 state 底部的 libriichi 预计算面板选出最优动作：\n\n1. 【和牌必胡 (hora)】：若候选含 hora，除All-Last（南4局/东4局）第4位未逆转外，100%必选 hora。\n2. 【副露吃碰判断 (pon/chi vs none)】：\n   - 必须严格查看底部的【libriichi 副露(吃/碰)模拟器精确对比】！\n   - 只要模拟器判定为「❌ 严禁鸣牌」或「⚠️ 倾向不鸣牌 none」（例如已听牌破听、向听数未推进、无役副露导致EV暴跌），100%必选 none！\n   - 只有当模拟器明确判定为「✅ 推荐鸣牌」时，才选择对应的 pon 或 chi 动作。\n3. 【他家立直攻防】：\n   - 若底部出现 opponent_riichi_genbutsu（他家已立直告警），且自家当前 shanten >= 2（或低打点1向听），必须弃和防守！严格从 100%_safe_genbutsu_in_hand（对立直家100%安全现物）中选择切牌，绝不切生张点炮。\n4. 【立直 vs 默听 (reach vs 切牌)】：\n   - 当门前清听牌（shanten=0）且候选有 reach 时：若已存在【有役默听真听牌 (unconditional_tenpai_discards 非空)】且（自家处于南4局/东4局可锁顺位，或默听打点 EV >= 3000 已足够），优先不立直（直接切对应的听牌切牌默听）；若无役听牌（unconditional_tenpai_discards 为空）则必选 reach 立直！\n5. 【常态何切（无人立直）】：\n   - 直接严格遵循底部的【libriichi 综合最优何切推荐榜】，优先选择「推荐 #1」对应的切牌！";
+
+fn jev_http_runtime() -> &'static (tokio::runtime::Runtime, reqwest::Client) {
+    static RT: std::sync::OnceLock<(tokio::runtime::Runtime, reqwest::Client)> =
+        std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build Jev HTTP tokio runtime");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(4200))
+            .build()
+            .expect("failed to build Jev reqwest client");
+        (rt, client)
+    })
 }
 
 fn query_jev_decision(state: &PlayerState, mask: &[bool]) -> EngineDecision {
@@ -640,43 +713,137 @@ fn query_jev_decision(state: &PlayerState, mask: &[bool]) -> EngineDecision {
     }
 
     let options: Vec<String> = legal.iter().map(|(_, s)| s.clone()).collect();
+    let mut criteria = serde_json::Map::new();
+    for opt in &options {
+        criteria.insert(
+            opt.clone(),
+            serde_json::Value::String(describe_action_option(opt)),
+        );
+    }
+
+    let context = state.jev_context_info(mask);
     let payload = serde_json::json!({
-        "context": state.jev_context_info(mask),
-        "options": options,
+        "model": "typesafe/jev-1.14",
+        "state": [{"type": "text", "text": context}],
+        "questions": {
+            "action": {
+                "type": "choice",
+                "instructions": JEV_INSTRUCTIONS,
+                "criteria": criteria,
+            }
+        }
     });
 
-    let mut chosen_idx = legal[0].0;
+    let api_key = load_openrouter_api_key();
+    let body_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+
+    let mut chosen_idx = legal
+        .iter()
+        .find(|&&(_, ref lbl)| lbl == "none")
+        .map(|&(i, _)| i)
+        .unwrap_or(legal[0].0);
     for &(i, _) in &legal {
         q_values[i] = 0.0;
     }
 
-    if let Ok(mut child) = std::process::Command::new("python3")
-        .arg("/tmp/jev_decide.py")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(payload.to_string().as_bytes());
-        }
-        if let Ok(output) = child.wait_with_output() {
-            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(probs) = val.get("probs").and_then(|v| v.as_object()) {
+    let t0 = std::time::Instant::now();
+    let mut probs_map = serde_json::Map::new();
+    for opt in &options {
+        probs_map.insert(opt.clone(), serde_json::json!(0.0));
+    }
+    let mut chosen_label = action_idx_to_label(chosen_idx);
+    let mut err_msg: Option<String> = None;
+
+    let res: Result<serde_json::Value, String> = std::thread::scope(|s| {
+        s.spawn(|| {
+            let (rt, client) = jev_http_runtime();
+            rt.block_on(async {
+                let mut last_err = String::new();
+                for attempt in 0..2 {
+                    if attempt > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    let req = client
+                        .post("https://openrouter.ai/api/alpha/decisions")
+                        .header("Authorization", format!("Bearer {api_key}"))
+                        .header("Content-Type", "application/json")
+                        .header("HTTP-Referer", "https://github.com/majsoul-autopilot")
+                        .header("X-Title", "majsoul-jev-live")
+                        .body(body_bytes.clone());
+                    match req.send().await {
+                        Ok(resp) => match resp.bytes().await {
+                            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                Ok(val) => return Ok(val),
+                                Err(e) => last_err = format!("json parse error: {e}"),
+                            },
+                            Err(e) => last_err = format!("read body error: {e}"),
+                        },
+                        Err(e) => last_err = format!("http send error: {e}"),
+                    }
+                }
+                Err(last_err)
+            })
+        })
+        .join()
+        .unwrap_or_else(|_| Err("jev worker thread panicked".to_string()))
+    });
+
+    match res {
+        Ok(val) => {
+            if let Some(ans) = val.get("answers").and_then(|v| v.get("action")) {
+                if let Some(dist) = ans.get("probabilities").and_then(|v| v.as_object()) {
                     for &(i, ref lbl) in &legal {
-                        if let Some(p) = probs.get(lbl).and_then(|v| v.as_f64()) {
+                        if let Some(p) = dist.get(lbl).and_then(|v| v.as_f64()) {
                             q_values[i] = p as f32;
+                            probs_map.insert(lbl.clone(), serde_json::json!(p));
                         }
                     }
                 }
-                if let Some(choice_str) = val.get("choice").and_then(|v| v.as_str()) {
-                    if let Some(&(i, _)) = legal.iter().find(|&&(_, ref lbl)| lbl == choice_str) {
+                if let Some(c_str) = ans.get("choice").and_then(|v| v.as_str()) {
+                    if let Some(&(i, ref lbl)) = legal.iter().find(|&&(_, ref l)| l == c_str) {
                         chosen_idx = i;
+                        chosen_label = lbl.clone();
                     }
+                } else if let Some(&(i, ref lbl)) = legal.iter().max_by(|&&(i1, _), &&(i2, _)| {
+                    q_values[i1]
+                        .partial_cmp(&q_values[i2])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    chosen_idx = i;
+                    chosen_label = lbl.clone();
                 }
             }
         }
+        Err(e) => {
+            err_msg = Some(e);
+            probs_map.insert(chosen_label.clone(), serde_json::json!(1.0));
+        }
+    }
+
+    let latency_ms = t0.elapsed().as_millis() as u64;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let mut log_entry = serde_json::json!({
+        "ts": ts,
+        "latency_ms": latency_ms,
+        "options": options,
+        "choice": chosen_label,
+        "probs": probs_map,
+    });
+    if let Some(err) = err_msg {
+        if let Some(obj) = log_entry.as_object_mut() {
+            obj.insert("error".to_string(), serde_json::Value::String(err));
+        }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/jev_live_decisions.jsonl")
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", log_entry);
     }
 
     EngineDecision {

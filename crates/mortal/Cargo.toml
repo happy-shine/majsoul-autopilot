@@ -9,7 +9,9 @@ anyhow.workspace = true
 candle-core.workspace = true
 candle-nn.workspace = true
 mjai = { path = "../mjai" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 riichi = { package = "riichi-core", path = "../riichi-core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
