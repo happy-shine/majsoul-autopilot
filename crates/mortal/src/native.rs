@@ -620,18 +620,24 @@ fn action_idx_to_label(idx: usize) -> String {
     }
 }
 
-fn describe_action_option(opt: &str) -> String {
+fn describe_action_option(opt: &str, has_reach: bool) -> String {
     match opt {
-        "hora" => "立即和牌（自摸或荣和得分）".to_string(),
-        "reach" => "宣言立直（门前清听牌加1番并争夺里宝牌）".to_string(),
-        "pon" => "碰牌（副露鸣牌）".to_string(),
-        "chi_low" => "低位顺子吃牌（如用56吃4）".to_string(),
-        "chi_mid" => "嵌张顺子吃牌（如用46吃5）".to_string(),
-        "chi_high" => "高位顺子吃牌（如用34吃5）".to_string(),
-        "kan" => "杠牌（暗杠/加杠/大明杠）".to_string(),
+        "hora" => "立即和牌（自摸或荣和得分，必选）".to_string(),
+        "reach" => "宣言立直（当【立直最终结论】或「推荐 #1」为 reach 时100%必选此项！宣言后下一步再切立直宣言牌）".to_string(),
+        "pon" => "碰牌（仅当【副露最终结论】明确推荐 pon 时选择）".to_string(),
+        "chi_low" => "低位顺子吃牌（仅当【副露最终结论】明确推荐 chi_low 时选择）".to_string(),
+        "chi_mid" => "嵌张顺子吃牌（仅当【副露最终结论】明确推荐 chi_mid 时选择）".to_string(),
+        "chi_high" => "高位顺子吃牌（仅当【副露最终结论】明确推荐 chi_high 时选择）".to_string(),
+        "kan" => "杠牌（仅当【杠牌评估】明确判定「✅ 可选暗杠/加杠」时选择）".to_string(),
         "ryukyoku" => "九种九牌流局".to_string(),
-        "none" => "跳过不鸣牌/不动作（保持门前清或保持当前听牌）".to_string(),
-        other => format!("切出牌 {other}"),
+        "none" => "跳过不鸣牌/不动作（当【副露最终结论】为「❌ 严禁鸣牌」时100%必选 none）".to_string(),
+        other => {
+            if has_reach {
+                format!("放弃立直，不立直转为默听或退向切出牌 {other}")
+            } else {
+                format!("切出牌 {other}")
+            }
+        }
     }
 }
 
@@ -665,7 +671,7 @@ fn load_openrouter_api_key() -> String {
     String::new()
 }
 
-const JEV_INSTRUCTIONS: &str = "你是日本立直麻将（雀魂玉之间·四人南/东）顶级AI决策引擎。请严格依据 state 底部的 libriichi 预计算面板选出最优动作：\n\n1. 【和牌必胡 (hora)】：若候选含 hora，除All-Last（南4局/东4局）第4位未逆转外，100%必选 hora。\n2. 【副露吃碰判断 (pon/chi vs none)】：\n   - 必须严格查看底部的【libriichi 副露(吃/碰)模拟器精确对比】！\n   - 只要模拟器判定为「❌ 严禁鸣牌」或「⚠️ 倾向不鸣牌 none」（例如已听牌破听、向听数未推进、无役副露导致EV暴跌），100%必选 none！\n   - 只有当模拟器明确判定为「✅ 推荐鸣牌」时，才选择对应的 pon 或 chi 动作。\n3. 【他家立直攻防】：\n   - 若底部出现 opponent_riichi_genbutsu（他家已立直告警），且自家当前 shanten >= 2（或低打点1向听），必须弃和防守！严格从 100%_safe_genbutsu_in_hand（对立直家100%安全现物）中选择切牌，绝不切生张点炮。\n4. 【立直 vs 默听 (reach vs 切牌)】：\n   - 当门前清听牌（shanten=0）且候选有 reach 时：若已存在【有役默听真听牌 (unconditional_tenpai_discards 非空)】且（自家处于南4局/东4局可锁顺位，或默听打点 EV >= 3000 已足够），优先不立直（直接切对应的听牌切牌默听）；若无役听牌（unconditional_tenpai_discards 为空）则必选 reach 立直！\n5. 【常态何切（无人立直）】：\n   - 直接严格遵循底部的【libriichi 综合最优何切推荐榜】，优先选择「推荐 #1」对应的切牌！";
+const JEV_INSTRUCTIONS: &str = "你是日本立直麻将（雀魂玉之间·四人南/东）顶级AI决策引擎。请严格遵循 state 底部 libriichi 预计算面板的精确结论选择动作：\n\n1. 【和牌必胡 (hora)】：若候选含 hora，除All-Last（南4局/东4局）第4位未逆转外，100%必选 hora。\n2. 【立直 vs 默听 (reach vs 切牌)】：\n   - 当候选含 reach 时，必须严格查看底部的【libriichi 立直(reach) vs 默听(切牌) 精确对比】与【立直最终结论】！\n   - 只要【立直最终结论】为「✅ 强烈推荐立直」或底部推荐榜「推荐 #1」为 reach，100%必选 reach（注意：在二步立直协议中，必须先选 reach 宣言立直，下一步再切宣言牌；直接选牌名代表放弃立直变默听）！\n   - 仅当【立直最终结论】明确为「✅ 推荐有役默听」或「❌ 严禁立直」时，才不选 reach、直接切「推荐 #1」对应的牌。\n3. 【副露吃碰杠判断 (pon/chi/kan vs none)】：\n   - 必须严格遵循底部的【副露最终结论】与【杠牌(kan)评估】！\n   - 只要【副露最终结论】为「❌ 严禁鸣牌，100%必选 none」，100%必选 none！\n   - 只有当【副露最终结论】明确为「✅ 推荐鸣牌，请直接选择 XX」时，才选择该鸣牌动作。\n4. 【何切与他家立直攻防】：\n   - 底部的【libriichi 综合最优何切推荐榜】已自动融合进攻牌效与他家立直安全度（现物/筋牌/壁牌/字牌危险度），在弃和/兜牌及常态何切时，直接100%选择「推荐 #1」对应的动作！";
 
 fn jev_http_runtime() -> &'static (tokio::runtime::Runtime, reqwest::Client) {
     static RT: std::sync::OnceLock<(tokio::runtime::Runtime, reqwest::Client)> =
@@ -712,12 +718,13 @@ fn query_jev_decision(state: &PlayerState, mask: &[bool]) -> EngineDecision {
         };
     }
 
+    let has_reach = mask.get(37).copied().unwrap_or(false);
     let options: Vec<String> = legal.iter().map(|(_, s)| s.clone()).collect();
     let mut criteria = serde_json::Map::new();
     for opt in &options {
         criteria.insert(
             opt.clone(),
-            serde_json::Value::String(describe_action_option(opt)),
+            serde_json::Value::String(describe_action_option(opt, has_reach)),
         );
     }
 
