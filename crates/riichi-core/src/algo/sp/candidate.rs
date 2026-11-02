@@ -136,12 +136,15 @@ impl Candidate {
             .map(|r| format!("{}@{}", r.tile, r.count))
             .collect::<Vec<_>>()
             .join(",");
+        let ev = self.exp_values.first().copied().unwrap_or(0.0);
+        let wp = self.win_probs.first().copied().unwrap_or(0.0) * 100.;
+        let tp = self.tenpai_probs.first().copied().unwrap_or(0.0) * 100.;
         if can_discard {
             vec![
                 self.tile.to_string(),
-                format!("{:.03}", self.exp_values[0]),
-                format!("{:.03}", self.win_probs[0] * 100.),
-                format!("{:.03}", self.tenpai_probs[0] * 100.),
+                format!("{ev:.03}"),
+                format!("{wp:.03}"),
+                format!("{tp:.03}"),
                 if self.shanten_down { "Yes" } else { "No" }.to_owned(),
                 self.required_tiles.len().to_string(),
                 self.num_required_tiles.to_string(),
@@ -149,9 +152,9 @@ impl Candidate {
             ]
         } else {
             vec![
-                format!("{:.03}", self.exp_values[0]),
-                format!("{:.03}", self.win_probs[0] * 100.),
-                format!("{:.03}", self.tenpai_probs[0] * 100.),
+                format!("{ev:.03}"),
+                format!("{wp:.03}"),
+                format!("{tp:.03}"),
                 self.required_tiles.len().to_string(),
                 self.num_required_tiles.to_string(),
                 required_tiles,

@@ -80,17 +80,10 @@ impl<E: NativeEngine> NativeBot<E> {
         let action_idx = observations.len();
         observations.push(observation);
 
-        let decisions = self.engine.react_batch(&observations)?;
-        ensure!(
-            decisions.len() == observations.len(),
-            "engine returned {} decisions for {} observations",
-            decisions.len(),
-            observations.len()
-        );
-
         let jev_dec = query_jev_decision(&self.state, &observations[action_idx].mask);
         let decision = &jev_dec;
-        let kan_decision = kan_select_idx.map(|idx| &decisions[idx]);
+        let kan_jev_dec = kan_select_idx.map(|idx| query_jev_decision(&self.state, &observations[idx].mask));
+        let kan_decision = kan_jev_dec.as_ref();
         let action = if self.enable_rule_based_agari_guard
             && decision.action == 43
             && !self.state.rule_based_agari()
