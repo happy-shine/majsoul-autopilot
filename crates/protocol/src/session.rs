@@ -155,6 +155,34 @@ impl ProtocolClient {
         self.summary.target_room = room;
     }
 
+    pub fn sync_pending_account_updates(&mut self) {
+        let mut updated_gold = None;
+        self.socket.retain_pending_frames(|raw| {
+            if raw.first().copied() != Some(0x01) {
+                return true;
+            }
+            let Ok(notify) = notify_body(raw) else {
+                return true;
+            };
+            if notify.method != ".lq.NotifyAccountUpdate" {
+                return true;
+            }
+            if let Ok(msg) = pb::NotifyAccountUpdate::decode(notify.body.as_slice()) {
+                if let Some(update) = msg.update {
+                    for num in update.numerical {
+                        if num.id == 100002 {
+                            updated_gold = Some(num.r#final);
+                        }
+                    }
+                }
+            }
+            false
+        });
+        if let Some(gold) = updated_gold {
+            self.summary.gold = gold;
+        }
+    }
+
     pub async fn refresh_account_summary(&mut self) -> Result<LoginSummary> {
         let response: pb::ResAccountInfo = self
             .socket
@@ -165,6 +193,7 @@ impl ProtocolClient {
                 },
             )
             .await?;
+        self.sync_pending_account_updates();
         if let Some(error) = response.error {
             if error.code != 0 {
                 return Err(anyhow!("fetchAccountInfo failed: code={}", error.code));
@@ -189,18 +218,56 @@ impl ProtocolClient {
         Ok(self.summary.clone())
     }
 
+    async fn claim_pending_mails(&mut self, timeout: std::time::Duration) -> u32 {
+        let mut mail_claimed = 0u32;
+        if let Ok(Ok(mail_info)) = tokio::time::timeout(
+            timeout,
+            self.socket
+                .request::<_, pb::ResMailInfo>(".lq.Lobby.fetchMailInfo", &pb::ReqCommon {}),
+        )
+        .await
+        {
+            if mail_info.error.as_ref().map_or(0, |e| e.code) == 0 {
+                for mail in mail_info.mails {
+                    if !mail.attachments.is_empty() && !mail.take_attachment {
+                        if let Ok(Ok(res)) = tokio::time::timeout(
+                            timeout,
+                            self.socket.request::<_, pb::ResCommon>(
+                                ".lq.Lobby.takeAttachmentFromMail",
+                                &pb::ReqTakeAttachment {
+                                    mail_id: mail.mail_id,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                mail_claimed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        mail_claimed
+    }
+
     pub async fn claim_available_coins(&mut self) -> CoinClaimReport {
+        use std::collections::{BTreeSet, HashMap, HashSet};
         const CLAIM_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+        self.sync_pending_account_updates();
         let gold_before = self.summary.gold;
         let mut claimed = Vec::new();
 
         // 1. Daily revive coin (e.g. 18,000 copper coins for Master tier) — claim FIRST while
-        //    gold is below threshold so daily perishable quota is used before one-time rewards.
+        //    gold may be below threshold so daily perishable relief quota is never wasted.
         if let Ok(Ok(info)) = tokio::time::timeout(
             CLAIM_RPC_TIMEOUT,
-            self.socket
-                .request::<_, pb::ResReviveCoinInfo>(".lq.Lobby.fetchReviveCoinInfo", &pb::ReqCommon {}),
+            self.socket.request::<_, pb::ResReviveCoinInfo>(
+                ".lq.Lobby.fetchReviveCoinInfo",
+                &pb::ReqCommon {},
+            ),
         )
         .await
         {
@@ -219,43 +286,66 @@ impl ProtocolClient {
             }
         }
 
-        // 2. Mail attachments (maintenance compensation, rank/event rewards).
-        if let Ok(Ok(mail_info)) = tokio::time::timeout(
+        // 2. Sync daily copper-coin tasks so today's 3 daily tasks are active on the server.
+        let _ = tokio::time::timeout(
             CLAIM_RPC_TIMEOUT,
             self.socket
-                .request::<_, pb::ResMailInfo>(".lq.Lobby.fetchMailInfo", &pb::ReqCommon {}),
+                .request::<_, pb::ResDailyTask>(".lq.Lobby.fetchDailyTask", &pb::ReqCommon {}),
+        )
+        .await;
+
+        // 3. Mail attachments (maintenance compensation, rank/event rewards).
+        let mut total_mail_claimed = self.claim_pending_mails(CLAIM_RPC_TIMEOUT).await;
+
+        // 4. Discover all currently active activities (especially Day-0 daily_sign events whose
+        //    sign_in_data is empty before the first sign-in, progress_reward, and exchange shops).
+        let mut active_daily_sign_ids = BTreeSet::new();
+        let mut active_progress_reward_ids = BTreeSet::new();
+        let mut active_exchange_ids = HashSet::new();
+        if let Ok(Ok(act_list)) = tokio::time::timeout(
+            CLAIM_RPC_TIMEOUT,
+            self.socket.request::<_, pb::ResActivityList>(
+                ".lq.Lobby.fetchActivityList",
+                &pb::ReqCommon {},
+            ),
         )
         .await
         {
-            if mail_info.error.as_ref().map_or(0, |e| e.code) == 0 {
-                let mut mail_claimed = 0u32;
-                for mail in mail_info.mails {
-                    if !mail.attachments.is_empty() && !mail.take_attachment {
-                        if let Ok(Ok(res)) = tokio::time::timeout(
-                            CLAIM_RPC_TIMEOUT,
-                            self.socket.request::<_, pb::ResCommon>(
-                                ".lq.Lobby.takeAttachmentFromMail",
-                                &pb::ReqTakeAttachment {
-                                    mail_id: mail.mail_id,
-                                },
-                            ),
-                        )
-                        .await
-                        {
-                            if res.error.as_ref().map_or(0, |e| e.code) == 0 {
-                                mail_claimed += 1;
-                            }
-                        }
+            if act_list.error.as_ref().map_or(0, |e| e.code) == 0 {
+                for a in act_list.activities {
+                    if a.activity_id == 0 {
+                        continue;
                     }
-                }
-                if mail_claimed > 0 {
-                    claimed.push(format!("mail({mail_claimed})"));
+                    match a.r#type.as_str() {
+                        "daily_sign" => {
+                            active_daily_sign_ids.insert(a.activity_id);
+                        }
+                        "progress_reward" => {
+                            active_progress_reward_ids.insert(a.activity_id);
+                        }
+                        "exchange" => {
+                            active_exchange_ids.insert(a.activity_id);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
 
-        // 3. Activity sign-in & completed activity/period/random tasks.
-        if let Ok(Ok(act)) = tokio::time::timeout(
+        // 5. Multi-pass cascading sweep over all regular & limited-time activity rewards.
+        //    Completing stage N of newcomer/event quests often immediately unlocks stage N+1.
+        let mut total_act_signin = 0u32;
+        let mut total_act_tasks = 0usize;
+        let mut total_period_tasks = 0usize;
+        let mut total_random_tasks = 0usize;
+        let mut total_flip_tasks = 0usize;
+        let mut total_segment_tasks = 0u32;
+        let mut total_point_rewards = 0u32;
+        let mut total_progress_rewards = 0u32;
+        let mut total_sub_event_rewards = 0u32;
+        let mut latest_exchange_records: HashMap<u32, u32> = HashMap::new();
+
+        let mut act_opt = tokio::time::timeout(
             CLAIM_RPC_TIMEOUT,
             self.socket.request::<_, pb::ResAccountActivityData>(
                 ".lq.Lobby.fetchAccountActivityData",
@@ -263,17 +353,149 @@ impl ProtocolClient {
             ),
         )
         .await
-        {
-            if act.error.as_ref().map_or(0, |e| e.code) == 0 {
-                let mut act_signin = 0u32;
-                for sign in act.sign_in_data {
+        .ok()
+        .and_then(|r| r.ok())
+        .filter(|a| a.error.as_ref().map_or(0, |e| e.code) == 0);
+
+        for pass in 0..3 {
+            let Some(act) = act_opt.take() else {
+                break;
+            };
+
+            latest_exchange_records.clear();
+            for rec in &act.exchange_records {
+                latest_exchange_records.insert(rec.exchange_id, rec.count);
+            }
+
+            if pass == 0 {
+                // 5a. Activity & 7-day login sign-ins (both existing sign_in_data and Day-0 active daily_sign).
+                let mut sign_ids = active_daily_sign_ids.clone();
+                for sign in &act.sign_in_data {
                     if sign.activity_id != 0 {
+                        sign_ids.insert(sign.activity_id);
+                    }
+                }
+                for activity_id in sign_ids {
+                    if let Ok(Ok(res)) = tokio::time::timeout(
+                        CLAIM_RPC_TIMEOUT,
+                        self.socket.request::<_, pb::ResDoActivitySignIn>(
+                            ".lq.Lobby.doActivitySignIn",
+                            &pb::ReqDoActivitySignIn { activity_id },
+                        ),
+                    )
+                    .await
+                    {
+                        if res.error.as_ref().map_or(0, |e| e.code) == 0 && !res.rewards.is_empty()
+                        {
+                            total_act_signin += 1;
+                        }
+                    }
+                }
+
+                // 5b. Accumulated point milestone rewards (game_point events).
+                for ap in &act.accumulated_point_list {
+                    if ap.activity_id == 0 || ap.point <= 0 {
+                        continue;
+                    }
+                    let gained: HashSet<u32> = ap.gained_reward_list.iter().copied().collect();
+                    let base = if ap.activity_id >= 100_000 {
+                        ap.activity_id.saturating_mul(100)
+                    } else {
+                        ap.activity_id.saturating_mul(1000)
+                    };
+                    for tier in 1..=40u32 {
+                        let reward_id = base.saturating_add(tier);
+                        if gained.contains(&reward_id) {
+                            continue;
+                        }
                         if let Ok(Ok(res)) = tokio::time::timeout(
                             CLAIM_RPC_TIMEOUT,
-                            self.socket.request::<_, pb::ResDoActivitySignIn>(
-                                ".lq.Lobby.doActivitySignIn",
-                                &pb::ReqDoActivitySignIn {
-                                    activity_id: sign.activity_id,
+                            self.socket.request::<_, pb::ResCommon>(
+                                ".lq.Lobby.gainAccumulatedPointActivityReward",
+                                &pb::ReqGainAccumulatedPointActivityReward {
+                                    activity_id: ap.activity_id,
+                                    reward_id,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                total_point_rewards += 1;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                // 5c. Progress-bar activity rewards (e.g. 2500 / 5000 / 7500 / 10000 thresholds).
+                let mut prog_map: HashMap<u32, HashSet<u32>> = HashMap::new();
+                for aid in &active_progress_reward_ids {
+                    prog_map.entry(*aid).or_default();
+                }
+                for pr in &act.progress_reward_data {
+                    if pr.activity_id != 0 {
+                        prog_map
+                            .entry(pr.activity_id)
+                            .or_default()
+                            .extend(pr.rewarded_progresses.iter().copied());
+                    }
+                }
+                for (activity_id, rewarded_set) in prog_map {
+                    if let Ok(Ok(info)) = tokio::time::timeout(
+                        CLAIM_RPC_TIMEOUT,
+                        self.socket
+                            .request::<_, pb::ResFetchProgressRewardActivityInfo>(
+                                ".lq.Lobby.fetchProgressRewardActivityInfo",
+                                &pb::ReqFetchProgressRewardActivityInfo { activity_id },
+                            ),
+                    )
+                    .await
+                    {
+                        if info.error.as_ref().map_or(0, |e| e.code) == 0 && info.progress > 0 {
+                            let targets: Vec<u32> = [2500u32, 5000, 7500, 10000]
+                                .into_iter()
+                                .filter(|t| *t <= info.progress && !rewarded_set.contains(t))
+                                .collect();
+                            if !targets.is_empty() {
+                                if let Ok(Ok(res)) = tokio::time::timeout(
+                                    CLAIM_RPC_TIMEOUT,
+                                    self.socket
+                                        .request::<_, pb::ResProgressRewardActivityReceive>(
+                                            ".lq.Lobby.progressRewardActivityReceive",
+                                            &pb::ReqProgressRewardActivityReceive {
+                                                activity_id,
+                                                progresses: targets,
+                                            },
+                                        ),
+                                )
+                                .await
+                                {
+                                    if res.error.as_ref().map_or(0, |e| e.code) == 0
+                                        && !res.reward_items.is_empty()
+                                    {
+                                        total_progress_rewards += res.reward_items.len() as u32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 5d. Upgrade, RPG, Gift inboxes, Spot, Story, Snowball, and MMO support rewards.
+                for up in &act.upgrade_data {
+                    if up.activity_id != 0
+                        && up.groups.iter().any(|g| g.level > up.received_level)
+                    {
+                        if let Ok(Ok(res)) = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResReceiveUpgradeActivityReward>(
+                                ".lq.Lobby.receiveUpgradeActivityReward",
+                                &pb::ReqReceiveUpgradeActivityReward {
+                                    activity_id: up.activity_id,
                                 },
                             ),
                         )
@@ -282,90 +504,712 @@ impl ProtocolClient {
                             if res.error.as_ref().map_or(0, |e| e.code) == 0
                                 && !res.rewards.is_empty()
                             {
-                                act_signin += 1;
+                                total_sub_event_rewards += 1;
                             }
                         }
                     }
                 }
-                if act_signin > 0 {
-                    claimed.push(format!("activity_sign_in({act_signin})"));
-                }
 
-                let task_ids: Vec<u32> = act
-                    .task_progress_list
-                    .into_iter()
-                    .filter(|p| p.achieved && !p.rewarded)
-                    .map(|p| p.id)
-                    .collect();
-                if !task_ids.is_empty() {
-                    if let Ok(Ok(res)) = tokio::time::timeout(
-                        CLAIM_RPC_TIMEOUT,
-                        self.socket.request::<_, pb::ResCommon>(
-                            ".lq.Lobby.completeActivityTaskBatch",
-                            &pb::ReqCompleteActivityTaskBatch {
-                                task_list: task_ids.clone(),
-                            },
-                        ),
-                    )
-                    .await
+                for rpg in &act.rpg_data {
+                    if rpg.activity_id != 0
+                        && (rpg.current_state.is_some() || rpg.last_show_id > 0)
                     {
-                        if res.error.as_ref().map_or(0, |e| e.code) == 0 {
-                            claimed.push(format!("activity_tasks({})", task_ids.len()));
+                        if let Ok(Ok(res)) = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResReceiveRpgRewards>(
+                                ".lq.Lobby.receiveRPGRewards",
+                                &pb::ReqReceiveRpgRewards {
+                                    activity_id: rpg.activity_id,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            if res.error.as_ref().map_or(0, |e| e.code) == 0
+                                && !res.items.is_empty()
+                            {
+                                total_sub_event_rewards += 1;
+                            }
                         }
                     }
                 }
 
-                let period_ids: Vec<u32> = act
-                    .period_task_progress_list
-                    .into_iter()
-                    .filter(|p| p.achieved && !p.rewarded)
-                    .map(|p| p.id)
-                    .collect();
-                if !period_ids.is_empty() {
+                let mut gift_act_ids = BTreeSet::new();
+                for feed in &act.feed_data {
+                    if feed.activity_id != 0
+                        && feed.gift_inbox.iter().any(|g| g.received == 0)
+                    {
+                        gift_act_ids.insert(feed.activity_id);
+                    }
+                }
+                for fg in &act.friend_gift_data {
+                    if fg.activity_id != 0 && fg.gift_inbox.iter().any(|g| g.received == 0) {
+                        gift_act_ids.insert(fg.activity_id);
+                    }
+                }
+                for activity_id in gift_act_ids {
                     if let Ok(Ok(res)) = tokio::time::timeout(
                         CLAIM_RPC_TIMEOUT,
-                        self.socket.request::<_, pb::ResCommon>(
-                            ".lq.Lobby.completePeriodActivityTaskBatch",
-                            &pb::ReqCompletePeriodActivityTaskBatch {
-                                task_list: period_ids.clone(),
-                            },
+                        self.socket.request::<_, pb::ResReceiveAllActivityGift>(
+                            ".lq.Lobby.receiveAllActivityGift",
+                            &pb::ReqReceiveAllActivityGift { activity_id },
                         ),
                     )
                     .await
                     {
                         if res.error.as_ref().map_or(0, |e| e.code) == 0 {
-                            claimed.push(format!("period_tasks({})", period_ids.len()));
+                            total_sub_event_rewards += 1;
                         }
                     }
                 }
 
-                let random_ids: Vec<u32> = act
-                    .random_task_progress_list
-                    .into_iter()
-                    .filter(|p| p.achieved && !p.rewarded)
-                    .map(|p| p.id)
-                    .collect();
-                if !random_ids.is_empty() {
+                for spot_act in &act.spot_data {
+                    for spot in &spot_act.spots {
+                        if spot.unlocked != 0 && spot.rewarded == 0 {
+                            if let Ok(Ok(res)) = tokio::time::timeout(
+                                CLAIM_RPC_TIMEOUT,
+                                self.socket.request::<_, pb::ResReceiveActivitySpotReward>(
+                                    ".lq.Lobby.receiveActivitySpotReward",
+                                    &pb::ReqReceiveActivitySpotReward {
+                                        unique_id: spot.unique_id,
+                                    },
+                                ),
+                            )
+                            .await
+                            {
+                                if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                    total_sub_event_rewards += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for story_act in &act.story_data {
+                    if story_act.activity_id == 0 {
+                        continue;
+                    }
+                    for st in &story_act.unlocked_story {
+                        let rewarded_endings: HashSet<u32> =
+                            st.rewarded_ending.iter().copied().collect();
+                        for &ending_id in &st.finished_ending {
+                            if !rewarded_endings.contains(&ending_id) {
+                                if let Ok(Ok(res)) = tokio::time::timeout(
+                                    CLAIM_RPC_TIMEOUT,
+                                    self.socket.request::<_, pb::ResStoryReward>(
+                                        ".lq.Lobby.storyActivityReceiveEndingReward",
+                                        &pb::ReqStoryActivityReceiveEndingReward {
+                                            activity_id: story_act.activity_id,
+                                            story_id: st.story_id,
+                                            ending_id,
+                                        },
+                                    ),
+                                )
+                                .await
+                                {
+                                    if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                        total_sub_event_rewards += 1;
+                                    }
+                                }
+                            }
+                        }
+                        if !st.finished_ending.is_empty() && st.finish_rewarded == 0 {
+                            if let Ok(Ok(res)) = tokio::time::timeout(
+                                CLAIM_RPC_TIMEOUT,
+                                self.socket.request::<_, pb::ResStoryReward>(
+                                    ".lq.Lobby.storyActivityReceiveFinishReward",
+                                    &pb::ReqStoryActivityReceiveFinishReward {
+                                        activity_id: story_act.activity_id,
+                                        story_id: st.story_id,
+                                    },
+                                ),
+                            )
+                            .await
+                            {
+                                if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                    total_sub_event_rewards += 1;
+                                }
+                            }
+                        }
+                        if !st.finished_ending.is_empty() && st.all_finish_rewarded == 0 {
+                            if let Ok(Ok(res)) = tokio::time::timeout(
+                                CLAIM_RPC_TIMEOUT,
+                                self.socket.request::<_, pb::ResStoryReward>(
+                                    ".lq.Lobby.storyActivityReceiveAllFinishReward",
+                                    &pb::ReqStoryActivityReceiveAllFinishReward {
+                                        activity_id: story_act.activity_id,
+                                        story_id: st.story_id,
+                                    },
+                                ),
+                            )
+                            .await
+                            {
+                                if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                    total_sub_event_rewards += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for sb in &act.snowball_data {
+                    if sb.activity_id == 0 {
+                        continue;
+                    }
+                    let rewarded: HashSet<u32> = sb.rewarded_level.iter().copied().collect();
+                    let levels: Vec<u32> = sb
+                        .finished_level
+                        .iter()
+                        .copied()
+                        .filter(|l| !rewarded.contains(l))
+                        .collect();
+                    if !levels.is_empty() {
+                        if let Ok(Ok(res)) = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResSnowballActivityReceiveReward>(
+                                ".lq.Lobby.snowballActivityReceiveReward",
+                                &pb::ReqSnowballActivityReceiveReward {
+                                    activity_id: sb.activity_id,
+                                    level: levels,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            if res.error.as_ref().map_or(0, |e| e.code) == 0
+                                && !res.rewards.is_empty()
+                            {
+                                total_sub_event_rewards += 1;
+                            }
+                        }
+                    }
+                }
+
+                for mmo in &act.mmo_data {
+                    if mmo.activity_id == 0 {
+                        continue;
+                    }
+                    let has_support = mmo.support.as_ref().is_some_and(|s| {
+                        s.receive_support_count > 0 || !s.support_record.is_empty()
+                    });
+                    if has_support {
+                        if let Ok(Ok(res)) = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResMmoActivityReceiveSupportReward>(
+                                ".lq.Lobby.mmoActivityReceiveSupportReward",
+                                &pb::ReqMmoActivityReceiveSupportReward {
+                                    activity_id: mmo.activity_id,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            if res.error.as_ref().map_or(0, |e| e.code) == 0
+                                && !res.rewards.is_empty()
+                            {
+                                total_sub_event_rewards += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 5e. Segment / multi-stage milestone tasks.
+            let mut attempted_tasks = false;
+            for seg in &act.segment_task_progress_list {
+                if !seg.failed
+                    && (seg.achieved_count > seg.reward_count || (seg.achieved && !seg.rewarded))
+                {
+                    let cnt = seg.achieved_count.saturating_sub(seg.reward_count).max(1);
                     if let Ok(Ok(res)) = tokio::time::timeout(
                         CLAIM_RPC_TIMEOUT,
-                        self.socket.request::<_, pb::ResCommon>(
-                            ".lq.Lobby.completeRandomActivityTaskBatch",
-                            &pb::ReqCompleteActivityTaskBatch {
-                                task_list: random_ids.clone(),
+                        self.socket.request::<_, pb::ResCompleteSegmentTaskReward>(
+                            ".lq.Lobby.completeSegmentTaskReward",
+                            &pb::ReqCompleteSegmentTaskReward {
+                                task_id: seg.id,
+                                count: cnt,
                             },
                         ),
                     )
                     .await
                     {
-                        if res.error.as_ref().map_or(0, |e| e.code) == 0 {
-                            claimed.push(format!("random_tasks({})", random_ids.len()));
+                        if res.error.as_ref().map_or(0, |e| e.code) == 0
+                            && !res.rewards.is_empty()
+                        {
+                            total_segment_tasks += 1;
+                            attempted_tasks = true;
+                        }
+                    }
+                }
+            }
+
+            // Track unrewarded task IDs before completion so we accurately count only tasks that
+            // actually transitioned to rewarded=true (ignoring future reward_limit_day locked tasks).
+            let pre_task_rewarded: HashSet<u32> = act
+                .task_progress_list
+                .iter()
+                .filter(|p| p.rewarded)
+                .map(|p| p.id)
+                .collect();
+            let pre_period_rewarded: HashSet<u32> = act
+                .period_task_progress_list
+                .iter()
+                .filter(|p| p.rewarded)
+                .map(|p| p.id)
+                .collect();
+            let pre_random_rewarded: HashSet<u32> = act
+                .random_task_progress_list
+                .iter()
+                .filter(|p| p.rewarded)
+                .map(|p| p.id)
+                .collect();
+            let pre_flip_rewarded: HashSet<u32> = act
+                .flip_task_progress_list
+                .iter()
+                .filter(|p| p.rewarded)
+                .map(|p| p.id)
+                .collect();
+
+            // 5f. Regular activity tasks (batch with individual fallback).
+            let task_ids: Vec<u32> = act
+                .task_progress_list
+                .iter()
+                .filter(|p| p.achieved && !p.rewarded && !p.failed)
+                .map(|p| p.id)
+                .collect();
+            if !task_ids.is_empty() {
+                attempted_tasks = true;
+                let batch_ok = tokio::time::timeout(
+                    CLAIM_RPC_TIMEOUT,
+                    self.socket.request::<_, pb::ResCommon>(
+                        ".lq.Lobby.completeActivityTaskBatch",
+                        &pb::ReqCompleteActivityTaskBatch {
+                            task_list: task_ids.clone(),
+                        },
+                    ),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .is_some_and(|res| res.error.as_ref().map_or(0, |e| e.code) == 0);
+                if !batch_ok {
+                    for task_id in &task_ids {
+                        let _ = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResCommon>(
+                                ".lq.Lobby.completeActivityTask",
+                                &pb::ReqCompleteActivityTask { task_id: *task_id },
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // 5g. Period / newcomer growth / limited-time collaboration tasks (batch + individual fallback).
+            let period_ids: Vec<u32> = act
+                .period_task_progress_list
+                .iter()
+                .filter(|p| p.achieved && !p.rewarded && !p.failed)
+                .map(|p| p.id)
+                .collect();
+            if !period_ids.is_empty() {
+                attempted_tasks = true;
+                let batch_ok = tokio::time::timeout(
+                    CLAIM_RPC_TIMEOUT,
+                    self.socket.request::<_, pb::ResCommon>(
+                        ".lq.Lobby.completePeriodActivityTaskBatch",
+                        &pb::ReqCompletePeriodActivityTaskBatch {
+                            task_list: period_ids.clone(),
+                        },
+                    ),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .is_some_and(|res| res.error.as_ref().map_or(0, |e| e.code) == 0);
+                if !batch_ok {
+                    for task_id in &period_ids {
+                        let _ = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResCommon>(
+                                ".lq.Lobby.completePeriodActivityTask",
+                                &pb::ReqCompleteActivityTask { task_id: *task_id },
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // 5h. Random event tasks (batch + individual fallback).
+            let random_ids: Vec<u32> = act
+                .random_task_progress_list
+                .iter()
+                .filter(|p| p.achieved && !p.rewarded && !p.failed)
+                .map(|p| p.id)
+                .collect();
+            if !random_ids.is_empty() {
+                attempted_tasks = true;
+                let batch_ok = tokio::time::timeout(
+                    CLAIM_RPC_TIMEOUT,
+                    self.socket.request::<_, pb::ResCommon>(
+                        ".lq.Lobby.completeRandomActivityTaskBatch",
+                        &pb::ReqCompleteActivityTaskBatch {
+                            task_list: random_ids.clone(),
+                        },
+                    ),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .is_some_and(|res| res.error.as_ref().map_or(0, |e| e.code) == 0);
+                if !batch_ok {
+                    for task_id in &random_ids {
+                        let _ = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResCommon>(
+                                ".lq.Lobby.completeRandomActivityTask",
+                                &pb::ReqCompleteActivityTask { task_id: *task_id },
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // 5i. Flip-card / Bingo grid tasks.
+            let flip_ids: Vec<u32> = act
+                .flip_task_progress_list
+                .iter()
+                .filter(|p| p.achieved && !p.rewarded && !p.failed)
+                .map(|p| p.id)
+                .collect();
+            if !flip_ids.is_empty() {
+                attempted_tasks = true;
+                let _ = tokio::time::timeout(
+                    CLAIM_RPC_TIMEOUT,
+                    self.socket.request::<_, pb::ResReceiveActivityFlipTaskBatch>(
+                        ".lq.Lobby.receiveActivityFlipTaskBatch",
+                        &pb::ReqReceiveActivityFlipTaskBatch {
+                            task_list: flip_ids.clone(),
+                        },
+                    ),
+                )
+                .await;
+                let batch_ok = tokio::time::timeout(
+                    CLAIM_RPC_TIMEOUT,
+                    self.socket.request::<_, pb::ResCompleteActivityFlipTaskBatch>(
+                        ".lq.Lobby.completeActivityFlipTaskBatch",
+                        &pb::ReqCompleteActivityFlipTaskBatch {
+                            task_list: flip_ids.clone(),
+                        },
+                    ),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .is_some_and(|res| res.error.as_ref().map_or(0, |e| e.code) == 0);
+                if !batch_ok {
+                    for task_id in &flip_ids {
+                        let _ = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResReceiveActivityFlipTask>(
+                                ".lq.Lobby.receiveActivityFlipTask",
+                                &pb::ReqReceiveActivityFlipTask { task_id: *task_id },
+                            ),
+                        )
+                        .await;
+                        let _ = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket.request::<_, pb::ResCommon>(
+                                ".lq.Lobby.completeActivityFlipTask",
+                                &pb::ReqCompleteActivityTask { task_id: *task_id },
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            if !attempted_tasks {
+                break;
+            }
+
+            // Re-fetch activity data to verify which tasks actually became rewarded and to catch
+            // newly unlocked chained tasks in the next cascade pass.
+            let next_act = tokio::time::timeout(
+                CLAIM_RPC_TIMEOUT,
+                self.socket.request::<_, pb::ResAccountActivityData>(
+                    ".lq.Lobby.fetchAccountActivityData",
+                    &pb::ReqCommon {},
+                ),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .filter(|a| a.error.as_ref().map_or(0, |e| e.code) == 0);
+
+            let Some(mut next) = next_act else {
+                break;
+            };
+
+            let mut newly_task = next
+                .task_progress_list
+                .iter()
+                .filter(|p| p.rewarded && !pre_task_rewarded.contains(&p.id))
+                .count();
+            let mut newly_period = next
+                .period_task_progress_list
+                .iter()
+                .filter(|p| p.rewarded && !pre_period_rewarded.contains(&p.id))
+                .count();
+
+            // If a batch RPC returned code=0 without rewarding any item (e.g. mixed unlocked +
+            // future-day locked tasks in the same batch), fall back once to individual RPCs.
+            let mut retried_individually = false;
+            if pass == 0 && !task_ids.is_empty() && newly_task == 0 {
+                retried_individually = true;
+                for task_id in &task_ids {
+                    let _ = tokio::time::timeout(
+                        CLAIM_RPC_TIMEOUT,
+                        self.socket.request::<_, pb::ResCommon>(
+                            ".lq.Lobby.completeActivityTask",
+                            &pb::ReqCompleteActivityTask { task_id: *task_id },
+                        ),
+                    )
+                    .await;
+                }
+            }
+            if pass == 0 && !period_ids.is_empty() && newly_period == 0 {
+                retried_individually = true;
+                for task_id in &period_ids {
+                    let _ = tokio::time::timeout(
+                        CLAIM_RPC_TIMEOUT,
+                        self.socket.request::<_, pb::ResCommon>(
+                            ".lq.Lobby.completePeriodActivityTask",
+                            &pb::ReqCompleteActivityTask { task_id: *task_id },
+                        ),
+                    )
+                    .await;
+                }
+            }
+            if retried_individually {
+                if let Ok(Ok(refetched)) = tokio::time::timeout(
+                    CLAIM_RPC_TIMEOUT,
+                    self.socket.request::<_, pb::ResAccountActivityData>(
+                        ".lq.Lobby.fetchAccountActivityData",
+                        &pb::ReqCommon {},
+                    ),
+                )
+                .await
+                {
+                    if refetched.error.as_ref().map_or(0, |e| e.code) == 0 {
+                        next = refetched;
+                        newly_task = next
+                            .task_progress_list
+                            .iter()
+                            .filter(|p| p.rewarded && !pre_task_rewarded.contains(&p.id))
+                            .count();
+                        newly_period = next
+                            .period_task_progress_list
+                            .iter()
+                            .filter(|p| p.rewarded && !pre_period_rewarded.contains(&p.id))
+                            .count();
+                    }
+                }
+            }
+
+            let newly_random = next
+                .random_task_progress_list
+                .iter()
+                .filter(|p| p.rewarded && !pre_random_rewarded.contains(&p.id))
+                .count();
+            let newly_flip = next
+                .flip_task_progress_list
+                .iter()
+                .filter(|p| p.rewarded && !pre_flip_rewarded.contains(&p.id))
+                .count();
+
+            total_act_tasks += newly_task;
+            total_period_tasks += newly_period;
+            total_random_tasks += newly_random;
+            total_flip_tasks += newly_flip;
+
+            let progressed = newly_task + newly_period + newly_random + newly_flip;
+            if progressed == 0 {
+                break;
+            }
+            act_opt = Some(next);
+        }
+
+        if total_act_signin > 0 {
+            claimed.push(format!("activity_sign_in({total_act_signin})"));
+        }
+        if total_act_tasks > 0 {
+            claimed.push(format!("activity_tasks({total_act_tasks})"));
+        }
+        if total_period_tasks > 0 {
+            claimed.push(format!("period_tasks({total_period_tasks})"));
+        }
+        if total_random_tasks > 0 {
+            claimed.push(format!("random_tasks({total_random_tasks})"));
+        }
+        if total_flip_tasks > 0 {
+            claimed.push(format!("flip_tasks({total_flip_tasks})"));
+        }
+        if total_segment_tasks > 0 {
+            claimed.push(format!("segment_tasks({total_segment_tasks})"));
+        }
+        if total_point_rewards > 0 {
+            claimed.push(format!("point_rewards({total_point_rewards})"));
+        }
+        if total_progress_rewards > 0 {
+            claimed.push(format!("progress_rewards({total_progress_rewards})"));
+        }
+        if total_sub_event_rewards > 0 {
+            claimed.push(format!("event_rewards({total_sub_event_rewards})"));
+        }
+
+        // 6. Bag coin pouches & expiring event-token -> copper-coin exchanges in active event shops.
+        //    (Summon scrolls, bond gifts, rename scrolls, and selectable boxes are never touched.)
+        const COPPER_EXCHANGE_RULES: &[(u32, u32, u32, u32, u32)] = &[
+            // (exchange_id, activity_id, consume_id, consume_count, exchange_limit)
+            (1002009, 1002, 309001, 1, 15),
+            (1002010, 1002, 309002, 1, 15),
+            (1005015, 1005, 309003, 1, 30),
+            (1005016, 1005, 309004, 1, 30),
+            (1005017, 1005, 309005, 1, 30),
+            (1007013, 1007, 309006, 1, 13),
+            (1013001, 1013, 309008, 1, 8),
+            (1013002, 1013, 309009, 1, 8),
+            (1013003, 1013, 309010, 1, 8),
+            (1019005, 1019, 309011, 1, 12),
+            (1025001, 1025, 309013, 1, 15),
+            (1025002, 1025, 309014, 1, 15),
+            (1025003, 1025, 309015, 1, 15),
+            (1032005, 1032, 309017, 2, 15),
+            (1063001, 1063, 309020, 1, 40),
+            (1081001, 1081, 309024, 1, 40),
+            (1085005, 1085, 309027, 1, 20),
+            (1097012, 1097, 309029, 1, 12),
+            (1108012, 1108, 309030, 30, 12),
+            (1108013, 1108, 309030, 10, 999),
+            (1168003, 1168, 309031, 2, 40),
+            (1204011, 1204, 309039, 1, 15),
+            (1204012, 1204, 309038, 1, 20),
+            (1221011, 1221, 309043, 2, 20),
+            (1221012, 1221, 309042, 2, 50),
+            (1241011, 1241, 309046, 1, 15),
+            (1241012, 1241, 309045, 1, 20),
+            (22030611, 220306, 309054, 2, 20),
+            (22030612, 220306, 309053, 2, 50),
+            (22060611, 220606, 309058, 1, 15),
+            (22060612, 220606, 309057, 1, 20),
+            (22070611, 220706, 309061, 2, 20),
+            (22070612, 220706, 309060, 2, 50),
+            (22090811, 220908, 309067, 1, 15),
+            (22090812, 220908, 309066, 1, 20),
+            (23020212, 230202, 309071, 1, 15),
+            (23020213, 230202, 309070, 1, 20),
+            (23060313, 230603, 309074, 2, 20),
+            (23060314, 230603, 309073, 2, 50),
+            (23090213, 230902, 30900002, 1, 15),
+            (23090214, 230902, 30900001, 1, 20),
+            (24050313, 240503, 30900026, 2, 20),
+            (24050314, 240503, 30900027, 2, 50),
+            (25030212, 250302, 30900087, 2, 20),
+            (25030213, 250302, 30900088, 2, 50),
+        ];
+
+        if let Ok(Ok(bag_res)) = tokio::time::timeout(
+            CLAIM_RPC_TIMEOUT,
+            self.socket
+                .request::<_, pb::ResBagInfo>(".lq.Lobby.fetchBagInfo", &pb::ReqCommon {}),
+        )
+        .await
+        {
+            if bag_res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                if let Some(bag) = bag_res.bag {
+                    let mut stacks: HashMap<u32, u32> = HashMap::new();
+                    for item in bag.items {
+                        if item.stack > 0 {
+                            stacks.insert(item.item_id, item.stack);
+                        }
+                    }
+
+                    let mut pouches_used = 0u32;
+                    for coin_pouch_id in [300002u32, 300003] {
+                        let cnt = stacks.get(&coin_pouch_id).copied().unwrap_or(0);
+                        for _ in 0..cnt.min(20) {
+                            if let Ok(Ok(res)) = tokio::time::timeout(
+                                CLAIM_RPC_TIMEOUT,
+                                self.socket.request::<_, pb::ResCommon>(
+                                    ".lq.Lobby.useBagItem",
+                                    &pb::ReqUseBagItem {
+                                        item_id: coin_pouch_id,
+                                    },
+                                ),
+                            )
+                            .await
+                            {
+                                if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                    pouches_used += 1;
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if pouches_used > 0 {
+                        claimed.push(format!("coin_pouches({pouches_used})"));
+                    }
+
+                    if !active_exchange_ids.is_empty() {
+                        let mut exchanged_cnt = 0u32;
+                        for &(ex_id, act_id, consume_id, consume_count, ex_limit) in
+                            COPPER_EXCHANGE_RULES
+                        {
+                            if !active_exchange_ids.contains(&act_id) || consume_count == 0 {
+                                continue;
+                            }
+                            let have = stacks.get(&consume_id).copied().unwrap_or(0);
+                            let done = latest_exchange_records.get(&ex_id).copied().unwrap_or(0);
+                            let rem_quota = ex_limit.saturating_sub(done);
+                            let can_buy = (have / consume_count).min(rem_quota);
+                            if can_buy > 0 {
+                                if let Ok(Ok(res)) = tokio::time::timeout(
+                                    CLAIM_RPC_TIMEOUT,
+                                    self.socket.request::<_, pb::ResExchangeActivityItem>(
+                                        ".lq.Lobby.exchangeActivityItem",
+                                        &pb::ReqExchangeActivityItem {
+                                            exchange_id: ex_id,
+                                            count: can_buy,
+                                        },
+                                    ),
+                                )
+                                .await
+                                {
+                                    if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                        exchanged_cnt += can_buy;
+                                        if let Some(st) = stacks.get_mut(&consume_id) {
+                                            *st = st.saturating_sub(can_buy * consume_count);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if exchanged_cnt > 0 {
+                            claimed.push(format!("event_exchange({exchanged_cnt})"));
                         }
                     }
                 }
             }
         }
 
-        // 4. Unclaimed completed achievements (often grant copper coins on new accounts).
+        // 7. Unclaimed completed achievements & completed achievement group milestones.
         if let Ok(Ok(ach)) = tokio::time::timeout(
             CLAIM_RPC_TIMEOUT,
             self.socket
@@ -374,12 +1218,13 @@ impl ProtocolClient {
         .await
         {
             if ach.error.as_ref().map_or(0, |e| e.code) == 0 {
+                let rewarded_groups: HashSet<u32> = ach.rewarded_group.into_iter().collect();
                 let mut ach_claimed = 0u32;
                 for progress in ach
                     .progresses
                     .into_iter()
                     .filter(|p| p.achieved && !p.rewarded)
-                    .take(40)
+                    .take(200)
                 {
                     if let Ok(Ok(res)) = tokio::time::timeout(
                         CLAIM_RPC_TIMEOUT,
@@ -403,9 +1248,42 @@ impl ProtocolClient {
                 }
                 if ach_claimed > 0 {
                     claimed.push(format!("achievements({ach_claimed})"));
+                    let mut grp_claimed = 0u32;
+                    for group_id in 1..=14u32 {
+                        if rewarded_groups.contains(&group_id) {
+                            continue;
+                        }
+                        if let Ok(Ok(res)) = tokio::time::timeout(
+                            CLAIM_RPC_TIMEOUT,
+                            self.socket
+                                .request::<_, pb::ResReceiveAchievementGroupReward>(
+                                    ".lq.Lobby.receiveAchievementGroupReward",
+                                    &pb::ReqReceiveAchievementGroupReward { group_id },
+                                ),
+                        )
+                        .await
+                        {
+                            if res.error.as_ref().map_or(0, |e| e.code) == 0 {
+                                grp_claimed += 1;
+                            }
+                        }
+                    }
+                    if grp_claimed > 0 {
+                        claimed.push(format!("achievement_groups({grp_claimed})"));
+                    }
                 }
             }
         }
+
+        // 8. If any activity/achievement delivered rewards via mail, sweep mail once more,
+        //    then sync NotifyAccountUpdate so gold_after reflects exact real-time copper coins.
+        if !claimed.is_empty() {
+            total_mail_claimed += self.claim_pending_mails(CLAIM_RPC_TIMEOUT).await;
+        }
+        if total_mail_claimed > 0 {
+            claimed.insert(0, format!("mail({total_mail_claimed})"));
+        }
+        self.sync_pending_account_updates();
 
         CoinClaimReport {
             gold_before,
@@ -1025,5 +1903,107 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn sync_pending_account_updates_consumes_copper_coin_notify_and_preserves_match_start(
+    ) -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        let update_msg = pb::NotifyAccountUpdate {
+            update: Some(pb::AccountUpdate {
+                numerical: vec![pb::account_update::NumericalUpdate {
+                    id: 100002,
+                    r#final: 134_218,
+                }],
+                ..Default::default()
+            }),
+        };
+        let mut update_body = Vec::new();
+        update_msg.encode(&mut update_body)?;
+        let update_frame = [
+            vec![0x01],
+            encode_blocks(&[
+                ProtoBlock::Bytes {
+                    id: 1,
+                    data: b".lq.NotifyAccountUpdate".to_vec(),
+                },
+                ProtoBlock::Bytes {
+                    id: 2,
+                    data: update_body,
+                },
+            ]),
+        ]
+        .concat();
+
+        let match_msg = pb::NotifyMatchGameStart {
+            game_url: "route-2.maj-soul.com:443".to_string(),
+            connect_token: "tok".to_string(),
+            game_uuid: "uuid-1".to_string(),
+            match_mode_id: 6,
+            location: "route-2".to_string(),
+        };
+        let mut match_body = Vec::new();
+        match_msg.encode(&mut match_body)?;
+        let match_frame = [
+            vec![0x01],
+            encode_blocks(&[
+                ProtoBlock::Bytes {
+                    id: 1,
+                    data: b".lq.NotifyMatchGameStart".to_vec(),
+                },
+                ProtoBlock::Bytes {
+                    id: 2,
+                    data: match_body,
+                },
+            ]),
+        ]
+        .concat();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _req = ws.next().await.unwrap().unwrap();
+            ws.send(WsMessage::Binary(update_frame.into()))
+                .await
+                .unwrap();
+            ws.send(WsMessage::Binary(match_frame.into()))
+                .await
+                .unwrap();
+            ws.send(WsMessage::Binary(vec![0x03, 0x01, 0x00].into()))
+                .await
+                .unwrap();
+        });
+
+        let socket = LiqiSocket::connect(&format!("ws://{addr}/gateway")).await?;
+        let mut client = ProtocolClient {
+            socket,
+            route_id: "route-2".to_string(),
+            route_prep: None,
+            summary: LoginSummary {
+                account_id: 42,
+                nickname: "tester".to_string(),
+                level_id: 10101,
+                level_score: 0,
+                rank_tier: 1,
+                gold: 88_888,
+                target_mode: Mode::FourPlayerSouth,
+                target_room: Room::Bronze,
+                access_token: "token".to_string(),
+            },
+        };
+        client.socket.request_raw(".lq.Test.echo", b"").await?;
+        server.await?;
+
+        client.sync_pending_account_updates();
+        assert_eq!(client.summary.gold, 134_218);
+        let start = client.wait_for_match_start().await?;
+        assert_eq!(start.game_uuid, "uuid-1");
+        Ok(())
     }
 }

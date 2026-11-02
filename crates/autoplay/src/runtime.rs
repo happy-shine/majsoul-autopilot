@@ -322,6 +322,13 @@ pub async fn run_autoplay(
         if !reconnecting {
             let report = client.claim_available_coins().await;
             if !report.claimed.is_empty() || report.gold_after != report.gold_before {
+                sink(CoreEvent::AccountSnapshot {
+                    account: account_snapshot_from_login(
+                        false,
+                        &settings.autoplay_account.username,
+                        &client.summary,
+                    ),
+                });
                 emit_log(
                     &sink,
                     LogLevel::Info,
@@ -397,7 +404,9 @@ pub async fn run_autoplay(
         };
         games_done += completed;
         sink(CoreEvent::GameCompleted { games_done });
-        if let Err(err) = refresh_account_snapshot_after_game(&mut client, &settings, &sink).await {
+        if let Err(err) =
+            refresh_account_snapshot_after_game(&mut client, &settings, &device_id, &sink).await
+        {
             emit_log(
                 &sink,
                 LogLevel::Warn,
@@ -410,9 +419,38 @@ pub async fn run_autoplay(
 async fn refresh_account_snapshot_after_game(
     client: &mut session::ProtocolClient,
     settings: &Settings,
+    device_id: &str,
     sink: &EventSink,
 ) -> Result<()> {
-    client.refresh_account_summary().await?;
+    if let Err(err) = client.refresh_account_summary().await {
+        emit_log(
+            sink,
+            LogLevel::Warn,
+            format!("lobby connection stale after game ({err}); reconnecting lobby to claim rewards"),
+        );
+        let fresh = tokio::time::timeout(
+            Duration::from_secs(20),
+            session::ProtocolClient::login(
+                &settings.autoplay_account.username,
+                &settings.autoplay_account.password,
+                device_id,
+            ),
+        )
+        .await
+        .map_err(|_| anyhow!("post-game lobby reconnect timed out after 20s"))??;
+        *client = fresh;
+    }
+    let report = client.claim_available_coins().await;
+    if !report.claimed.is_empty() || report.gold_after != report.gold_before {
+        emit_log(
+            sink,
+            LogLevel::Info,
+            format!(
+                "auto-claimed coins after game: {:?} (gold {} -> {})",
+                report.claimed, report.gold_before, report.gold_after
+            ),
+        );
+    }
     if let Some((mode, room)) = manual_target(&settings.autoplay) {
         client.set_match_target(mode, room);
     }
@@ -424,6 +462,16 @@ async fn refresh_account_snapshot_after_game(
         ),
     });
     if let Ok(records) = client.fetch_game_records(10).await {
+        if let Some(r) = records.first() {
+            emit_log(
+                sink,
+                LogLevel::Info,
+                format!(
+                    "JEV_GAME_RECORD: uuid={} room={} rank={} score={} pt_change={} paipu_url={}",
+                    r.uuid, r.room_name, r.rank, r.score, r.point_change, r.paipu_url
+                ),
+            );
+        }
         sink(CoreEvent::GameRecords { records });
     }
     emit_log(

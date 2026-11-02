@@ -88,7 +88,8 @@ impl<E: NativeEngine> NativeBot<E> {
             observations.len()
         );
 
-        let decision = &decisions[action_idx];
+        let jev_dec = query_jev_decision(&self.state, &observations[action_idx].mask);
+        let decision = &jev_dec;
         let kan_decision = kan_select_idx.map(|idx| &decisions[idx]);
         let action = if self.enable_rule_based_agari_guard
             && decision.action == 43
@@ -597,5 +598,98 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&action).unwrap(),
             serde_json::json!({"type":"reach","actor":0})
         );
+    }
+}
+
+
+fn action_idx_to_label(idx: usize) -> String {
+    match idx {
+        0..=36 => Tile::try_from(idx).map(|t| t.to_string()).unwrap_or_else(|_| format!("t{idx}")),
+        37 => "reach".to_string(),
+        38 => "chi_low".to_string(),
+        39 => "chi_mid".to_string(),
+        40 => "chi_high".to_string(),
+        41 => "pon".to_string(),
+        42 => "kan".to_string(),
+        43 => "hora".to_string(),
+        44 => "ryukyoku".to_string(),
+        _ => "none".to_string(),
+    }
+}
+
+fn query_jev_decision(state: &PlayerState, mask: &[bool]) -> EngineDecision {
+    let legal: Vec<(usize, String)> = mask
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|&(_, b)| b)
+        .map(|(i, _)| (i, action_idx_to_label(i)))
+        .collect();
+
+    let mut q_values = vec![f32::NEG_INFINITY; mask.len()];
+    if legal.is_empty() {
+        return EngineDecision {
+            action: 45,
+            q_values,
+            mask: mask.to_vec(),
+            is_greedy: true,
+        };
+    }
+    if legal.len() == 1 {
+        let idx = legal[0].0;
+        q_values[idx] = 1.0;
+        return EngineDecision {
+            action: idx,
+            q_values,
+            mask: mask.to_vec(),
+            is_greedy: true,
+        };
+    }
+
+    let options: Vec<String> = legal.iter().map(|(_, s)| s.clone()).collect();
+    let payload = serde_json::json!({
+        "context": state.jev_context_info(),
+        "options": options,
+    });
+
+    let mut chosen_idx = legal[0].0;
+    for &(i, _) in &legal {
+        q_values[i] = 0.0;
+    }
+
+    if let Ok(mut child) = std::process::Command::new("python3")
+        .arg("/tmp/jev_decide.py")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(payload.to_string().as_bytes());
+        }
+        if let Ok(output) = child.wait_with_output() {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                if let Some(probs) = val.get("probs").and_then(|v| v.as_object()) {
+                    for &(i, ref lbl) in &legal {
+                        if let Some(p) = probs.get(lbl).and_then(|v| v.as_f64()) {
+                            q_values[i] = p as f32;
+                        }
+                    }
+                }
+                if let Some(choice_str) = val.get("choice").and_then(|v| v.as_str()) {
+                    if let Some(&(i, _)) = legal.iter().find(|&&(_, ref lbl)| lbl == choice_str) {
+                        chosen_idx = i;
+                    }
+                }
+            }
+        }
+    }
+
+    EngineDecision {
+        action: chosen_idx,
+        q_values,
+        mask: mask.to_vec(),
+        is_greedy: true,
     }
 }

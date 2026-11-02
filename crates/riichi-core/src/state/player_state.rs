@@ -249,4 +249,57 @@ single player table (max EV):
             self.tiles_left,
         )
     }
+
+    #[must_use]
+    pub fn jev_context_info(&self) -> String {
+        let mut out = self.brief_info();
+        if self.last_cans.can_agari() {
+            if let Ok(pt) = self.agari_points(self.last_cans.can_ron_agari, &[]) {
+                out.push_str(&format!(
+                    "\nagari_points: can_win_now=true (ron={}, tsumo_ko={}, tsumo_oya={})",
+                    pt.ron, pt.tsumo_ko, pt.tsumo_oya
+                ));
+            } else {
+                out.push_str("\nagari_points: can_win_now=true");
+            }
+        }
+        if self.last_cans.can_discard {
+            let uncond = self.discard_candidates_with_unconditional_tenpai_aka();
+            let tiles: Vec<String> = uncond
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| b)
+                .map(|(i, _)| must_tile!(i).to_string())
+                .collect();
+            out.push_str(&format!("\nunconditional_tenpai_discards (有役默听真听牌切牌): {:?}", tiles));
+        }
+        if self.last_cans.can_pon {
+            if let Some(kawa_t) = self.last_kawa_tile {
+                let d = kawa_t.deaka();
+                let is_yakuhai = d == self.bakaze || d == self.jikaze || d.as_u8() >= 31;
+                out.push_str(&format!(
+                    "\npon_target_tile: {} (is_1han_yakuhai_役牌={})",
+                    kawa_t, is_yakuhai
+                ));
+            }
+        }
+        for rel in 1..4 {
+            if self.riichi_declared[rel] {
+                let mut safe_in_hand = Vec::new();
+                for (tid, &cnt) in self.tehai.iter().enumerate() {
+                    if cnt > 0 {
+                        let t = must_tile!(tid);
+                        if self.kawa_overview[rel].contains(&t) {
+                            safe_in_hand.push(t.to_string());
+                        }
+                    }
+                }
+                out.push_str(&format!(
+                    "\nopponent_riichi_genbutsu: player_rel={} IS IN RIICHI! 100%_safe_genbutsu_in_hand={:?}",
+                    rel, safe_in_hand
+                ));
+            }
+        }
+        out
+    }
 }

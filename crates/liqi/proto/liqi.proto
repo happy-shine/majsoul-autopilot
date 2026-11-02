@@ -5397,6 +5397,10 @@ message ResAccountActivityData {
     repeated lq.ActivityIslandData island_data = 27;
     repeated lq.ActivityAmuletData amulet_data = 28;
     repeated lq.ActivityStoryData story_data = 29;
+    repeated lq.ActivityProgressRewardData progress_reward_data = 32;
+    repeated lq.ActivityBingoData bingo_data = 35;
+    repeated lq.ActivitySnowballData snowball_data = 36;
+    repeated lq.ActivityMMOData mmo_data = 39;
 
     message ActivitySignInData {
 
@@ -8206,4 +8210,140 @@ message RecordNoTile {
 message PlayerLeaving {
 
     uint32 seat = 1;
+}
+
+message ReqCompleteActivityFlipTaskBatch {
+
+    repeated uint32 task_list = 1;
+}
+
+message ResCompleteActivityFlipTaskBatch {
+
+    Error error = 1;
+    repeated ExecuteReward total_rewards = 2;
+}
+
+message ReqReceiveActivityFlipTaskBatch {
+
+    repeated uint32 task_list = 1;
+}
+
+message ResReceiveActivityFlipTaskBatch {
+
+    Error error = 1;
+    uint32 count = 2;
+}
+
+message ActivityProgressRewardData {
+
+    uint32 activity_id = 1;
+    repeated uint32 rewarded_progresses = 2;
+}
+
+message ReqFetchProgressRewardActivityInfo {
+
+    uint32 activity_id = 1;
+}
+
+message ResFetchProgressRewardActivityInfo {
+
+    Error error = 1;
+    uint32 progress = 2;
+}
+
+message ReqProgressRewardActivityReceive {
+
+    uint32 activity_id = 1;
+    repeated uint32 progresses = 2;
+}
+
+message ResProgressRewardActivityReceive {
+
+    Error error = 1;
+    repeated ExecuteReward reward_items = 2;
+}
+
+message ActivityBingoCardData {
+
+    uint32 card_id = 1;
+    repeated uint32 achieved_pos = 2;
+    repeated uint32 rewarded_ids = 3;
+    uint32 state = 4;
+}
+
+message ActivityBingoData {
+
+    uint32 activity_id = 1;
+    repeated ActivityBingoCardData cards = 2;
+}
+
+message ReqBingoActivityReceiveReward {
+
+    uint32 activity_id = 1;
+    repeated BingoReward rewards = 2;
+
+    message BingoReward {
+
+        uint32 reward_id = 1;
+        uint32 card_id = 2;
+    }
+}
+
+message ResBingoActivityReceiveReward {
+
+    Error error = 1;
+    repeated ActivityBingoCardData cards = 3;
+}
+
+message ActivitySnowballData {
+
+    uint32 activity_id = 1;
+    uint32 level = 2;
+    repeated uint32 rewarded_level = 4;
+    repeated uint32 finished_level = 5;
+}
+
+message ReqSnowballActivityReceiveReward {
+
+    uint32 activity_id = 1;
+    repeated uint32 level = 2;
+}
+
+message ResSnowballActivityReceiveReward {
+
+    Error error = 1;
+    repeated ExecuteReward rewards = 3;
+}
+
+message ActivityMMOSupportRecord {
+
+    uint32 account_id = 1;
+    uint32 count = 2;
+}
+
+message ActivityMMOSupportData {
+
+    uint32 last_receive_time = 1;
+    ActivityMMOSupportRecord most_supporter = 2;
+    uint32 receive_support_count = 3;
+    repeated ActivityMMOSupportRecord support_record = 100;
+}
+
+message ActivityMMOData {
+
+    uint32 activity_id = 1;
+    ActivityMMOSupportData support = 6;
+}
+
+message ReqMMOActivityReceiveSupportReward {
+
+    uint32 activity_id = 1;
+}
+
+message ResMMOActivityReceiveSupportReward {
+
+    Error error = 1;
+    repeated ExecuteReward rewards = 2;
+    uint32 support_count = 4;
+    uint32 total_support_count = 5;
 }

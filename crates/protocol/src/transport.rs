@@ -70,6 +70,13 @@ impl LiqiSocket {
         self.read_binary_frame().await
     }
 
+    pub fn retain_pending_frames<F>(&mut self, f: F)
+    where
+        F: FnMut(&Vec<u8>) -> bool,
+    {
+        self.pending_frames.retain(f);
+    }
+
     async fn read_response(&mut self, expected_msg_id: u16) -> Result<Vec<u8>> {
         loop {
             let bytes = self.read_binary_frame().await?;
